@@ -10,11 +10,7 @@
 
 #include "common/armor.h"
 
-#ifdef FASTCGI_INCLUDE_DIR
-# include "fastcgi/fcgiapp.h"
-#else
-# include "fcgiapp.h"
-#endif
+#include "rgw_client_io.h"
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -53,11 +49,28 @@ void rgw_get_errno_s3(rgw_html_errors *e , int err_no)
   }
 }
 
-int RGWGetObj_REST_S3::send_response(bufferlist& bl)
+struct response_attr_param {
+  const char *param;
+  const char *http_attr;
+};
+
+static struct response_attr_param resp_attr_params[] = {
+  {"response-content-type", "Content-Type"},
+  {"response-content-language", "Content-Language"},
+  {"response-expires", "Expires"},
+  {"response-cache-control", "Cache-Control"},
+  {"response-content-disposition", "Content-Disposition"},
+  {"response-content-encoding", "Content-Encoding"},
+  {NULL, NULL},
+};
+
+int RGWGetObj_ObjStore_S3::send_response(bufferlist& bl)
 {
-  string content_type_str;
   const char *content_type = NULL;
+  string content_type_str;
   int orig_ret = ret;
+  map<string, string> response_attrs;
+  map<string, string>::iterator riter;
 
   if (ret)
     goto done;
@@ -81,36 +94,37 @@ int RGWGetObj_REST_S3::send_response(bufferlist& bl)
       }
     }
 
-    if (s->args.has_response_modifier()) {
+    for (struct response_attr_param *p = resp_attr_params; p->param; p++) {
       bool exists;
-      content_type_str = s->args.get("response-content-type", &exists);
-      if (exists)
-	content_type = content_type_str.c_str();
-      string val = s->args.get("response-content-language", &exists);
-      if (exists)
-        CGI_PRINTF(s, "Content-Language: %s\n", val.c_str());
-      val = s->args.get("response-expires", &exists);
-      if (exists)
-        CGI_PRINTF(s, "Expires: %s\n", val.c_str());
-      val = s->args.get("response-cache-control", &exists);
-      if (exists)
-        CGI_PRINTF(s, "Cache-Control: %s\n", val.c_str());
-      val = s->args.get("response-content-disposition", &exists);
-      if (exists)
-        CGI_PRINTF(s, "Content-Disposition: %s\n", val.c_str());
-      val = s->args.get("response-content-encoding", &exists);
-      if (exists)
-        CGI_PRINTF(s, "Content-Encoding: %s\n", val.c_str());
+      string val = s->args.get(p->param, &exists);
+      if (exists) {
+	if (strcmp(p->param, "response-content-type") != 0) {
+	  response_attrs[p->http_attr] = val;
+	} else {
+	  content_type_str = val;
+	  content_type = content_type_str.c_str();
+	}
+      }
     }
 
     for (iter = attrs.begin(); iter != attrs.end(); ++iter) {
-       const char *name = iter->first.c_str();
-       if (strncmp(name, RGW_ATTR_META_PREFIX, sizeof(RGW_ATTR_META_PREFIX)-1) == 0) {
-         name += sizeof(RGW_ATTR_PREFIX) - 1;
-         CGI_PRINTF(s,"%s: %s\r\n", name, iter->second.c_str());
-       } else if (!content_type && strcmp(name, RGW_ATTR_CONTENT_TYPE) == 0) {
-         content_type = iter->second.c_str();
-       }
+      const char *name = iter->first.c_str();
+      map<string, string>::iterator aiter = rgw_to_http_attrs.find(name);
+      if (aiter != rgw_to_http_attrs.end()) {
+	if (response_attrs.count(aiter->second) > 0) // was already overridden by a response param
+	  continue;
+
+	if ((!content_type) && aiter->first.compare(RGW_ATTR_CONTENT_TYPE) == 0) { // special handling for content_type
+	  content_type = iter->second.c_str();
+	  continue;
+        }
+	response_attrs[aiter->second] = iter->second.c_str();
+      } else {
+        if (strncmp(name, RGW_ATTR_META_PREFIX, sizeof(RGW_ATTR_META_PREFIX)-1) == 0) {
+          name += sizeof(RGW_ATTR_PREFIX) - 1;
+          s->cio->print("%s: %s\r\n", name, iter->second.c_str());
+        }
+      }
     }
   }
 
@@ -120,6 +134,11 @@ done:
   set_req_state_err(s, ret);
 
   dump_errno(s);
+
+  for (riter = response_attrs.begin(); riter != response_attrs.end(); ++riter) {
+    s->cio->print("%s: %s\n", riter->first.c_str(), riter->second.c_str());
+  }
+
   if (!content_type)
     content_type = "binary/octet-stream";
   end_header(s, content_type);
@@ -127,13 +146,13 @@ done:
 
 send_data:
   if (get_data && !orig_ret) {
-    CGI_PutStr(s, bl.c_str(), len);
+    s->cio->write(bl.c_str(), len);
   }
 
   return 0;
 }
 
-void RGWListBuckets_REST_S3::send_response()
+void RGWListBuckets_ObjStore_S3::send_response()
 {
   if (ret)
     set_req_state_err(s, ret);
@@ -158,7 +177,7 @@ void RGWListBuckets_REST_S3::send_response()
   rgw_flush_formatter_and_reset(s, s->formatter);
 }
 
-int RGWListBucket_REST_S3::get_params()
+int RGWListBucket_ObjStore_S3::get_params()
 {
   prefix = s->args.get("prefix");
   marker = s->args.get("marker");
@@ -171,7 +190,7 @@ int RGWListBucket_REST_S3::get_params()
   return 0;
 }
 
-void RGWListBucket_REST_S3::send_response()
+void RGWListBucket_ObjStore_S3::send_response()
 {
   if (ret < 0)
     set_req_state_err(s, ret);
@@ -219,16 +238,28 @@ void RGWListBucket_REST_S3::send_response()
   rgw_flush_formatter_and_reset(s, s->formatter);
 }
 
+void RGWGetBucketLogging_ObjStore_S3::send_response()
+{
+  dump_errno(s);
+  end_header(s, "application/xml");
+  dump_start(s);
+
+  s->formatter->open_object_section_in_ns("BucketLoggingStatus",
+					  "http://doc.s3.amazonaws.com/doc/2006-03-01/");
+  s->formatter->close_section();
+  rgw_flush_formatter_and_reset(s, s->formatter);
+}
+
 static void dump_bucket_metadata(struct req_state *s, RGWBucketEnt& bucket)
 {
   char buf[32];
   snprintf(buf, sizeof(buf), "%lld", (long long)bucket.count);
-  CGI_PRINTF(s,"X-RGW-Object-Count: %s\n", buf);
+  s->cio->print("X-RGW-Object-Count: %s\n", buf);
   snprintf(buf, sizeof(buf), "%lld", (long long)bucket.size);
-  CGI_PRINTF(s,"X-RGW-Bytes-Used: %s\n", buf);
+  s->cio->print("X-RGW-Bytes-Used: %s\n", buf);
 }
 
-void RGWStatBucket_REST_S3::send_response()
+void RGWStatBucket_ObjStore_S3::send_response()
 {
   if (ret >= 0) {
     dump_bucket_metadata(s, bucket);
@@ -241,7 +272,7 @@ void RGWStatBucket_REST_S3::send_response()
   dump_start(s);
 }
 
-int RGWCreateBucket_REST_S3::get_params()
+int RGWCreateBucket_ObjStore_S3::get_params()
 {
   RGWAccessControlPolicy_S3 s3policy(s->cct);
   int r = s3policy.create_canned(s->user.user_id, s->user.display_name, s->canned_acl);
@@ -253,7 +284,7 @@ int RGWCreateBucket_REST_S3::get_params()
   return 0;
 }
 
-void RGWCreateBucket_REST_S3::send_response()
+void RGWCreateBucket_ObjStore_S3::send_response()
 {
   if (ret == -ERR_BUCKET_EXISTS)
     ret = 0;
@@ -263,7 +294,7 @@ void RGWCreateBucket_REST_S3::send_response()
   end_header(s);
 }
 
-void RGWDeleteBucket_REST_S3::send_response()
+void RGWDeleteBucket_ObjStore_S3::send_response()
 {
   int r = ret;
   if (!r)
@@ -274,7 +305,7 @@ void RGWDeleteBucket_REST_S3::send_response()
   end_header(s);
 }
 
-int RGWPutObj_REST_S3::get_params()
+int RGWPutObj_ObjStore_S3::get_params()
 {
   RGWAccessControlPolicy_S3 s3policy(s->cct);
   if (!s->length)
@@ -286,10 +317,10 @@ int RGWPutObj_REST_S3::get_params()
 
   policy = s3policy;
 
-  return RGWPutObj_REST::get_params();
+  return RGWPutObj_ObjStore::get_params();
 }
 
-void RGWPutObj_REST_S3::send_response()
+void RGWPutObj_ObjStore_S3::send_response()
 {
   if (ret) {
     set_req_state_err(s, ret);
@@ -301,7 +332,7 @@ void RGWPutObj_REST_S3::send_response()
   end_header(s);
 }
 
-void RGWDeleteObj_REST_S3::send_response()
+void RGWDeleteObj_ObjStore_S3::send_response()
 {
   int r = ret;
   if (r == -ENOENT)
@@ -314,7 +345,7 @@ void RGWDeleteObj_REST_S3::send_response()
   end_header(s);
 }
 
-int RGWCopyObj_REST_S3::init_dest_policy()
+int RGWCopyObj_ObjStore_S3::init_dest_policy()
 {
   RGWAccessControlPolicy_S3 s3policy(s->cct);
 
@@ -328,7 +359,7 @@ int RGWCopyObj_REST_S3::init_dest_policy()
   return 0;
 }
 
-int RGWCopyObj_REST_S3::get_params()
+int RGWCopyObj_ObjStore_S3::get_params()
 {
   if_mod = s->env->get("HTTP_X_AMZ_COPY_IF_MODIFIED_SINCE");
   if_unmod = s->env->get("HTTP_X_AMZ_COPY_IF_UNMODIFIED_SINCE");
@@ -336,7 +367,7 @@ int RGWCopyObj_REST_S3::get_params()
   if_nomatch = s->env->get("HTTP_X_AMZ_COPY_IF_NONE_MATCH");
 
   const char *req_src = s->copy_source;
-  if (!req_src || !req_src)
+  if (!req_src)
     return -EINVAL;
 
   ret = parse_copy_location(req_src, src_bucket_name, src_object);
@@ -366,7 +397,7 @@ int RGWCopyObj_REST_S3::get_params()
   return 0;
 }
 
-void RGWCopyObj_REST_S3::send_response()
+void RGWCopyObj_ObjStore_S3::send_response()
 {
   if (ret)
     set_req_state_err(s, ret);
@@ -389,17 +420,17 @@ void RGWCopyObj_REST_S3::send_response()
   }
 }
 
-void RGWGetACLs_REST_S3::send_response()
+void RGWGetACLs_ObjStore_S3::send_response()
 {
   if (ret)
     set_req_state_err(s, ret);
   dump_errno(s);
   end_header(s, "application/xml");
   dump_start(s);
-  CGI_PutStr(s, acls.c_str(), acls.size());
+  s->cio->write(acls.c_str(), acls.size());
 }
 
-int RGWPutACLs_REST_S3::get_canned_policy(ACLOwner& owner, stringstream& ss)
+int RGWPutACLs_ObjStore_S3::get_canned_policy(ACLOwner& owner, stringstream& ss)
 {
   RGWAccessControlPolicy_S3 s3policy(s->cct);
   bool r = s3policy.create_canned(owner.get_id(), owner.get_display_name(), s->canned_acl);
@@ -411,7 +442,7 @@ int RGWPutACLs_REST_S3::get_canned_policy(ACLOwner& owner, stringstream& ss)
   return 0;
 }
 
-void RGWPutACLs_REST_S3::send_response()
+void RGWPutACLs_ObjStore_S3::send_response()
 {
   if (ret)
     set_req_state_err(s, ret);
@@ -420,7 +451,7 @@ void RGWPutACLs_REST_S3::send_response()
   dump_start(s);
 }
 
-int RGWInitMultipart_REST_S3::get_params()
+int RGWInitMultipart_ObjStore_S3::get_params()
 {
   RGWAccessControlPolicy_S3 s3policy(s->cct);
   ret = s3policy.create_canned(s->user.user_id, s->user.display_name, s->canned_acl);
@@ -429,10 +460,10 @@ int RGWInitMultipart_REST_S3::get_params()
 
   policy = s3policy;
 
-  return RGWInitMultipart_REST::get_params();
+  return RGWInitMultipart_ObjStore::get_params();
 }
 
-void RGWInitMultipart_REST_S3::send_response()
+void RGWInitMultipart_ObjStore_S3::send_response()
 {
   if (ret)
     set_req_state_err(s, ret);
@@ -450,7 +481,7 @@ void RGWInitMultipart_REST_S3::send_response()
   }
 }
 
-void RGWCompleteMultipart_REST_S3::send_response()
+void RGWCompleteMultipart_ObjStore_S3::send_response()
 {
   if (ret)
     set_req_state_err(s, ret);
@@ -470,7 +501,7 @@ void RGWCompleteMultipart_REST_S3::send_response()
   }
 }
 
-void RGWAbortMultipart_REST_S3::send_response()
+void RGWAbortMultipart_ObjStore_S3::send_response()
 {
   int r = ret;
   if (!r)
@@ -481,7 +512,7 @@ void RGWAbortMultipart_REST_S3::send_response()
   end_header(s);
 }
 
-void RGWListMultipart_REST_S3::send_response()
+void RGWListMultipart_ObjStore_S3::send_response()
 {
   if (ret)
     set_req_state_err(s, ret);
@@ -535,7 +566,7 @@ void RGWListMultipart_REST_S3::send_response()
   }
 }
 
-void RGWListBucketMultiparts_REST_S3::send_response()
+void RGWListBucketMultiparts_ObjStore_S3::send_response()
 {
   if (ret < 0)
     set_req_state_err(s, ret);
@@ -593,7 +624,7 @@ void RGWListBucketMultiparts_REST_S3::send_response()
   rgw_flush_formatter_and_reset(s, s->formatter);
 }
 
-void RGWDeleteMultiObj_REST_S3::send_status()
+void RGWDeleteMultiObj_ObjStore_S3::send_status()
 {
   if (!status_dumped) {
     if (ret < 0)
@@ -603,7 +634,7 @@ void RGWDeleteMultiObj_REST_S3::send_status()
   }
 }
 
-void RGWDeleteMultiObj_REST_S3::begin_response()
+void RGWDeleteMultiObj_ObjStore_S3::begin_response()
 {
 
   if (!status_dumped) {
@@ -618,7 +649,7 @@ void RGWDeleteMultiObj_REST_S3::begin_response()
   rgw_flush_formatter(s, s->formatter);
 }
 
-void RGWDeleteMultiObj_REST_S3::send_partial_response(pair<string,int>& result)
+void RGWDeleteMultiObj_ObjStore_S3::send_partial_response(pair<string,int>& result)
 {
   if (!result.first.empty()) {
     if (result.second == 0 && !quiet) {
@@ -626,17 +657,17 @@ void RGWDeleteMultiObj_REST_S3::send_partial_response(pair<string,int>& result)
       s->formatter->dump_string("Key", result.first);
       s->formatter->close_section();
     } else if (result.first < 0) {
-      struct rgw_html_errors *r = new rgw_html_errors;
+      struct rgw_html_errors r;
       int err_no;
 
       s->formatter->open_object_section("Error");
 
       err_no = -(result.second);
-      rgw_get_errno_s3(r, err_no);
+      rgw_get_errno_s3(&r, err_no);
 
       s->formatter->dump_string("Key", result.first);
-      s->formatter->dump_int("Code", r->http_ret);
-      s->formatter->dump_string("Message", r->s3_code);
+      s->formatter->dump_int("Code", r.http_ret);
+      s->formatter->dump_string("Message", r.s3_code);
       s->formatter->close_section();
     }
 
@@ -644,106 +675,268 @@ void RGWDeleteMultiObj_REST_S3::send_partial_response(pair<string,int>& result)
   }
 }
 
-void RGWDeleteMultiObj_REST_S3::end_response()
+void RGWDeleteMultiObj_ObjStore_S3::end_response()
 {
 
   s->formatter->close_section();
   rgw_flush_formatter_and_reset(s, s->formatter);
 }
 
-RGWOp *RGWHandler_REST_S3::get_retrieve_obj_op(bool get_data)
+RGWOp *RGWHandler_ObjStore_Service_S3::op_get()
 {
-  if (is_acl_op()) {
-    return new RGWGetACLs_REST_S3;
-  }
-  if (s->object) {
-    RGWGetObj_REST_S3 *get_obj_op = new RGWGetObj_REST_S3;
-    get_obj_op->set_get_data(get_data);
-    return get_obj_op;
-  } else if (!s->bucket_name) {
-    return NULL;
-  }
+  return new RGWListBuckets_ObjStore_S3;
+}
 
-  if (s->args.exists("uploads"))
-    return new RGWListBucketMultiparts_REST_S3;
+RGWOp *RGWHandler_ObjStore_Service_S3::op_head()
+{
+  return new RGWListBuckets_ObjStore_S3;
+}
 
+RGWOp *RGWHandler_ObjStore_Bucket_S3::get_obj_op(bool get_data)
+{
   if (get_data)
-    return new RGWListBucket_REST_S3;
+    return new RGWListBucket_ObjStore_S3;
   else
-    return new RGWStatBucket_REST_S3;
+    return new RGWStatBucket_ObjStore_S3;
 }
 
-RGWOp *RGWHandler_REST_S3::get_retrieve_op(bool get_data)
+RGWOp *RGWHandler_ObjStore_Bucket_S3::op_get()
 {
-  if (s->bucket_name) {
-    if (is_acl_op()) {
-      return new RGWGetACLs_REST_S3;
-    } else if (s->args.exists("uploadId")) {
-      return new RGWListMultipart_REST_S3;
-    }
-    return get_retrieve_obj_op(get_data);
+  if (s->args.sub_resource_exists("logging"))
+    return new RGWGetBucketLogging_ObjStore_S3;
+  if (is_acl_op()) {
+    return new RGWGetACLs_ObjStore_S3;
+  } else if (s->args.exists("uploadId")) {
+    return new RGWListMultipart_ObjStore_S3;
   }
-
-  return new RGWListBuckets_REST_S3;
+  return get_obj_op(true);
 }
 
-RGWOp *RGWHandler_REST_S3::get_create_op()
+RGWOp *RGWHandler_ObjStore_Bucket_S3::op_head()
 {
   if (is_acl_op()) {
-    return new RGWPutACLs_REST_S3;
-  } else if (s->object) {
-    if (!s->copy_source)
-      return new RGWPutObj_REST_S3;
-    else
-      return new RGWCopyObj_REST_S3;
-  } else if (s->bucket_name) {
-    return new RGWCreateBucket_REST_S3;
+    return new RGWGetACLs_ObjStore_S3;
+  } else if (s->args.exists("uploadId")) {
+    return new RGWListMultipart_ObjStore_S3;
+  }
+  return get_obj_op(false);
+}
+
+RGWOp *RGWHandler_ObjStore_Bucket_S3::op_put()
+{
+  if (s->args.sub_resource_exists("logging"))
+    return NULL;
+  if (is_acl_op()) {
+    return new RGWPutACLs_ObjStore_S3;
+  }
+  return new RGWCreateBucket_ObjStore_S3;
+}
+
+RGWOp *RGWHandler_ObjStore_Bucket_S3::op_delete()
+{
+  return new RGWDeleteBucket_ObjStore_S3;
+}
+
+RGWOp *RGWHandler_ObjStore_Bucket_S3::op_post()
+{
+  if ( s->request_params == "delete" ) {
+    return new RGWDeleteMultiObj_ObjStore_S3;
   }
 
   return NULL;
 }
 
-RGWOp *RGWHandler_REST_S3::get_delete_op()
+RGWOp *RGWHandler_ObjStore_Obj_S3::get_obj_op(bool get_data)
+{
+  if (is_acl_op()) {
+    return new RGWGetACLs_ObjStore_S3;
+  }
+  RGWGetObj_ObjStore_S3 *get_obj_op = new RGWGetObj_ObjStore_S3;
+  get_obj_op->set_get_data(get_data);
+  return get_obj_op;
+}
+
+RGWOp *RGWHandler_ObjStore_Obj_S3::op_get()
+{
+  if (is_acl_op()) {
+    return new RGWGetACLs_ObjStore_S3;
+  } else if (s->args.exists("uploadId")) {
+    return new RGWListMultipart_ObjStore_S3;
+  }
+  return get_obj_op(true);
+}
+
+RGWOp *RGWHandler_ObjStore_Obj_S3::op_head()
+{
+  if (is_acl_op()) {
+    return new RGWGetACLs_ObjStore_S3;
+  } else if (s->args.exists("uploadId")) {
+    return new RGWListMultipart_ObjStore_S3;
+  }
+  return get_obj_op(false);
+}
+
+RGWOp *RGWHandler_ObjStore_Obj_S3::op_put()
+{
+  if (is_acl_op()) {
+    return new RGWPutACLs_ObjStore_S3;
+  }
+  if (!s->copy_source)
+    return new RGWPutObj_ObjStore_S3;
+  else
+    return new RGWCopyObj_ObjStore_S3;
+}
+
+RGWOp *RGWHandler_ObjStore_Obj_S3::op_delete()
 {
   string upload_id = s->args.get("uploadId");
 
-  if (s->object) {
-    if (upload_id.empty())
-      return new RGWDeleteObj_REST_S3;
-    else
-      return new RGWAbortMultipart_REST_S3;
-  } else if (s->bucket_name)
-    return new RGWDeleteBucket_REST_S3;
-
-  return NULL;
+  if (upload_id.empty())
+    return new RGWDeleteObj_ObjStore_S3;
+  else
+    return new RGWAbortMultipart_ObjStore_S3;
 }
 
-RGWOp *RGWHandler_REST_S3::get_post_op()
+RGWOp *RGWHandler_ObjStore_Obj_S3::op_post()
 {
-  if (s->object) {
-    if (s->args.exists("uploadId"))
-      return new RGWCompleteMultipart_REST_S3;
-    else
-      return new RGWInitMultipart_REST_S3;
-  }
-  else if (s->args.sub_resource_exists("delete")) {
-    return new RGWDeleteMultiObj_REST_S3;
-  }
-
-  return NULL;
+  if (s->args.exists("uploadId"))
+    return new RGWCompleteMultipart_ObjStore_S3;
+  else
+    return new RGWInitMultipart_ObjStore_S3;
 }
 
-int RGWHandler_REST_S3::init(RGWRados *store, struct req_state *state, FCGX_Request *fcgx)
+int RGWHandler_ObjStore_S3::init_from_header(struct req_state *s, int default_formatter, bool configurable_format)
 {
-  const char *cacl = state->env->get("HTTP_X_AMZ_ACL");
+  string req;
+  string first;
+
+  const char *req_name = s->decoded_uri.c_str();
+  const char *p;
+
+  if (*req_name == '?') {
+    p = req_name;
+  } else {
+    p = s->request_params.c_str();
+  }
+
+  s->args.set(p);
+  s->args.parse();
+
+  /* must be called after the args parsing */
+  int ret = allocate_formatter(s, default_formatter, configurable_format);
+  if (ret < 0)
+    return ret;
+
+  if (*req_name != '/')
+    return 0;
+
+  req_name++;
+
+  if (!*req_name)
+    return 0;
+
+  req = req_name;
+  int pos = req.find('/');
+  if (pos >= 0) {
+    first = req.substr(0, pos);
+  } else {
+    first = req;
+  }
+
+  if (!s->bucket_name) {
+    s->bucket_name_str = first;
+    s->bucket_name = strdup(s->bucket_name_str.c_str());
+
+    if (pos >= 0) {
+      string encoded_obj_str = req.substr(pos+1);
+      s->object_str = encoded_obj_str;
+
+      if (s->object_str.size() > 0) {
+        s->object = strdup(s->object_str.c_str());
+      }
+    }
+  } else {
+    s->object_str = req_name;
+    s->object = strdup(s->object_str.c_str());
+  }
+  return 0;
+}
+
+static bool looks_like_ip_address(const char *bucket)
+{
+  int num_periods = 0;
+  bool expect_period = false;
+  for (const char *b = bucket; *b; ++b) {
+    if (*b == '.') {
+      if (!expect_period)
+	return false;
+      ++num_periods;
+      if (num_periods > 3)
+	return false;
+      expect_period = false;
+    }
+    else if (isdigit(*b)) {
+      expect_period = true;
+    }
+    else {
+      return false;
+    }
+  }
+  return (num_periods == 3);
+}
+
+int RGWHandler_ObjStore_S3::validate_bucket_name(const string& bucket)
+{
+  int ret = RGWHandler_ObjStore::validate_bucket_name(bucket);
+  if (ret < 0)
+    return ret;
+
+  if (bucket.size() == 0)
+    return 0;
+
+  if (!(isalpha(bucket[0]) || isdigit(bucket[0]))) {
+    // bucket names must start with a number or letter
+    return -ERR_INVALID_BUCKET_NAME;
+  }
+
+  for (const char *s = bucket.c_str(); *s; ++s) {
+    char c = *s;
+    if (isdigit(c) || (c == '.'))
+      continue;
+    if (isalpha(c))
+      continue;
+    if ((c == '-') || (c == '_'))
+      continue;
+    // Invalid character
+    return -ERR_INVALID_BUCKET_NAME;
+  }
+
+  if (looks_like_ip_address(bucket.c_str()))
+    return -ERR_INVALID_BUCKET_NAME;
+
+  return 0;
+}
+
+int RGWHandler_ObjStore_S3::init(RGWRados *store, struct req_state *s, RGWClientIO *cio)
+{
+  dout(10) << "s->object=" << (s->object ? s->object : "<NULL>") << " s->bucket=" << (s->bucket_name ? s->bucket_name : "<NULL>") << dendl;
+
+  int ret = validate_bucket_name(s->bucket_name_str);
+  if (ret)
+    return ret;
+  ret = validate_object_name(s->object_str);
+  if (ret)
+    return ret;
+
+  const char *cacl = s->env->get("HTTP_X_AMZ_ACL");
   if (cacl)
-    state->canned_acl = cacl;
+    s->canned_acl = cacl;
 
-  state->copy_source = state->env->get("HTTP_X_AMZ_COPY_SOURCE");
+  s->copy_source = s->env->get("HTTP_X_AMZ_COPY_SOURCE");
 
-  state->dialect = "s3";
+  s->dialect = "s3";
 
-  return RGWHandler_REST::init(store, state, fcgx);
+  return RGWHandler_ObjStore::init(store, s, cio);
 }
 
 /*
@@ -767,11 +960,6 @@ static void get_canon_amz_hdr(struct req_state *s, string& dest)
  */
 static void get_canon_resource(struct req_state *s, string& dest)
 {
-  if (s->host_bucket) {
-    dest = "/";
-    dest.append(s->host_bucket);
-  }
-
   dest.append(s->request_uri.c_str());
 
   map<string, string>& sub = s->args.get_sub_resources();
@@ -869,7 +1057,7 @@ static bool get_auth_header(struct req_state *s, string& dest, bool qsr)
  * verify that a signed request comes from the keyholder
  * by checking the signature against our locally-computed version
  */
-int RGWHandler_REST_S3::authorize()
+int RGW_Auth_S3::authorize(RGWRados *store, struct req_state *s)
 {
   bool qsr = false;
   string auth_id;
@@ -972,4 +1160,26 @@ int RGWHandler_REST_S3::authorize()
   return  0;
 }
 
+int RGWHandler_Auth_S3::init(RGWRados *store, struct req_state *state, RGWClientIO *cio)
+{
+  int ret = RGWHandler_ObjStore_S3::init_from_header(state, RGW_FORMAT_JSON, true);
+  if (ret < 0)
+    return ret;
 
+  return RGWHandler_ObjStore::init(store, state, cio);
+}
+
+RGWHandler *RGWRESTMgr_S3::get_handler(struct req_state *s)
+{
+  int ret = RGWHandler_ObjStore_S3::init_from_header(s, RGW_FORMAT_XML, false);
+  if (ret < 0)
+    return NULL;
+
+  if (!s->bucket_name)
+    return new RGWHandler_ObjStore_Service_S3;
+
+  if (!s->object)
+    return new RGWHandler_ObjStore_Bucket_S3;
+
+  return new RGWHandler_ObjStore_Obj_S3;
+}

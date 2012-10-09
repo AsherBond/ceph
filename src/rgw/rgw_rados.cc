@@ -393,8 +393,10 @@ int RGWRados::log_list_init(const string& prefix, RGWAccessHandle *handle)
   log_list_state *state = new log_list_state;
   const char *log_pool = params.log_pool.name.c_str();
   int r = rados->ioctx_create(log_pool, state->io_ctx);
-  if (r < 0)
+  if (r < 0) {
+    delete state;
     return r;
+  }
   state->prefix = prefix;
   state->obit = state->io_ctx.objects_begin();
   *handle = (RGWAccessHandle)state;
@@ -446,8 +448,10 @@ int RGWRados::log_show_init(const string& name, RGWAccessHandle *handle)
   log_show_state *state = new log_show_state;
   const char *log_pool = params.log_pool.name.c_str();
   int r = rados->ioctx_create(log_pool, state->io_ctx);
-  if (r < 0)
+  if (r < 0) {
+    delete state;
     return r;
+  }
   state->name = name;
   *handle = (RGWAccessHandle)state;
   return 0;
@@ -471,7 +475,11 @@ int RGWRados::log_show_next(RGWAccessHandle handle, rgw_log_entry *entry)
       return r;
     state->pos += r;
     bufferlist old;
-    old.substr_of(state->bl, off, state->bl.length() - off);
+    try {
+      old.substr_of(state->bl, off, state->bl.length() - off);
+    } catch (buffer::error& err) {
+      return -EINVAL;
+    }
     state->bl.clear();
     state->bl.claim(old);
     state->bl.claim_append(more);
@@ -3209,14 +3217,47 @@ int RGWRados::check_disk_state(librados::IoCtx io_ctx,
     return -ENOENT;
   }
 
+  string etag;
+  string content_type;
+  ACLOwner owner;
+
   object.size = astate->size;
   object.mtime = astate->mtime;
+
+  map<string, bufferlist>::iterator iter = astate->attrset.find(RGW_ATTR_ETAG);
+  if (iter != astate->attrset.end()) {
+    etag = iter->second.c_str();
+  }
+  iter = astate->attrset.find(RGW_ATTR_CONTENT_TYPE);
+  if (iter != astate->attrset.end()) {
+    content_type = iter->second.c_str();
+  }
+  iter = astate->attrset.find(RGW_ATTR_ACL);
+  if (iter != astate->attrset.end()) {
+    r = decode_policy(iter->second, &owner);
+    if (r < 0) {
+      dout(0) << "WARNING: could not decode policy for object: " << obj << dendl;
+    }
+  }
+
+  object.etag = etag;
+  object.content_type = content_type;
+  object.owner = owner.get_id();
+  object.owner_display_name = owner.get_display_name();
 
   // encode suggested updates
   list_state.epoch = astate->epoch;
   list_state.meta.size = object.size;
   list_state.meta.mtime.set_from_double(double(object.mtime));
   list_state.meta.category = main_category;
+  list_state.meta.etag = etag;
+  list_state.meta.content_type = content_type;
+  if (astate->obj_tag.length() > 0)
+    list_state.meta.tag = astate->obj_tag.c_str();
+  list_state.meta.owner = owner.get_id();
+  list_state.meta.owner_display_name = owner.get_display_name();
+
+
   list_state.exists = true;
   cls_rgw_encode_suggestion(CEPH_RGW_UPDATE, list_state, suggested_updates);
   return 0;
@@ -3374,7 +3415,7 @@ int RGWRados::process_intent_log(rgw_bucket& bucket, string& oid,
     }
     switch (entry.intent) {
     case DEL_OBJ:
-      if (!flags & I_DEL_OBJ) {
+      if (!(flags & I_DEL_OBJ)) {
         complete = false;
         break;
       }
@@ -3385,7 +3426,7 @@ int RGWRados::process_intent_log(rgw_bucket& bucket, string& oid,
       }
       break;
     case DEL_DIR:
-      if (!flags & I_DEL_DIR) {
+      if (!(flags & I_DEL_DIR)) {
         complete = false;
         break;
       } else {

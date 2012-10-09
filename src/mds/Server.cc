@@ -203,6 +203,7 @@ void Server::handle_client_session(MClientSession *m)
       if (session->is_stale()) {
 	mds->sessionmap.set_state(session, Session::STATE_OPEN);
 	mds->locker->resume_stale_caps(session);
+	mds->sessionmap.touch_session(session);
       }
       mds->messenger->send_message(new MClientSession(CEPH_SESSION_RENEWCAPS, m->get_seq()), 
 				   m->get_connection());
@@ -268,6 +269,7 @@ void Server::_session_logged(Session *session, uint64_t state_seq, bool open, ve
   } else if (open) {
     assert(session->is_opening());
     mds->sessionmap.set_state(session, Session::STATE_OPEN);
+    mds->sessionmap.touch_session(session);
     mds->messenger->send_message(new MClientSession(CEPH_SESSION_OPEN), session->inst);
   } else if (session->is_closing() ||
 	     session->is_killing()) {
@@ -348,6 +350,7 @@ void Server::finish_force_open_sessions(map<client_t,entity_inst_t>& cm,
       } else {
 	dout(10) << "force_open_sessions opened " << session->inst << dendl;
 	mds->sessionmap.set_state(session, Session::STATE_OPEN);
+	mds->sessionmap.touch_session(session);
 	mds->messenger->send_message(new MClientSession(CEPH_SESSION_OPEN), session->inst);
       }
     } else {
@@ -3454,7 +3457,9 @@ void Server::handle_client_removexattr(MDRequest *mdr)
     return;
 
   string name(req->get_path2());
-  if (cur->xattrs.count(name) == 0) {
+
+  map<string, bufferptr> *pxattrs = cur->get_projected_xattrs();
+  if (pxattrs->count(name) == 0) {
     dout(10) << "removexattr '" << name << "' and ENODATA on " << *cur << dendl;
     reply_request(mdr, -ENODATA);
     return;

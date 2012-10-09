@@ -1440,7 +1440,8 @@ void OSDMap::print_osd_line(int cur, ostream *out, Formatter *f) const
   if (out)
     *out << "osd." << cur << "\t";
   if (!exists(cur)) {
-    *out << "DNE\t\t";
+    if (out)
+      *out << "DNE\t\t";
   } else {
     if (is_up(cur)) {
       if (out)
@@ -1525,7 +1526,8 @@ void OSDMap::print_tree(ostream *out, Formatter *f) const
       for (int k=s-1; k>=0; k--) {
 	int item = crush->get_bucket_item(cur, k);
 	q.push_front(qi(item, depth+1, (float)crush->get_bucket_item_weight(cur, k) / (float)0x10000));
-	f->dump_int("child", item);
+	if (f)
+	  f->dump_int("child", item);
       }
       if (f)
 	f->close_section();

@@ -18,6 +18,7 @@
 #include <sys/fcntl.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <dirent.h>
 #include <sys/xattr.h>
 
@@ -96,7 +97,7 @@ TEST(LibCephFS, Dir_ls) {
 
   ASSERT_EQ(ceph_mkdir(cmount, foostr, 0777), 0);
   struct stat stbuf;
-  ASSERT_EQ(ceph_lstat(cmount, foostr, &stbuf), 0);
+  ASSERT_EQ(ceph_stat(cmount, foostr, &stbuf), 0);
   ASSERT_NE(S_ISDIR(stbuf.st_mode), 0);
 
   char barstr[256];
@@ -165,19 +166,15 @@ TEST(LibCephFS, Dir_ls) {
     ASSERT_STREQ(result->d_name, entries[i].first);
   }
 
+  ceph_rewinddir(cmount, ls_dir);
+
   int t = ceph_telldir(cmount, ls_dir);
   ASSERT_GT(t, -1);
 
-  ceph_rewinddir(cmount, ls_dir);
-
-  // test seekdir - move to end
-  ceph_seekdir(cmount, ls_dir, t);
-
-  // check that we're at the end
   ASSERT_TRUE(ceph_readdir(cmount, ls_dir) != NULL);
-  ASSERT_TRUE(ceph_readdir(cmount, ls_dir) == NULL);
 
-  ceph_rewinddir(cmount, ls_dir);
+  // test seekdir - move back to the beginning
+  ceph_seekdir(cmount, ls_dir, t);
 
   // test getdents
   struct dirent *getdents_entries;
@@ -404,6 +401,85 @@ TEST(LibCephFS, Double_chmod) {
 
   ASSERT_EQ(ceph_write(cmount, fd, bytes, strlen(bytes), 0), (int)strlen(bytes));
   ceph_close(cmount, fd);
+
+  ceph_shutdown(cmount);
+}
+
+TEST(LibCephFS, Fchmod) {
+  struct ceph_mount_info *cmount;
+  ASSERT_EQ(ceph_create(&cmount, NULL), 0);
+  ASSERT_EQ(ceph_conf_read_file(cmount, NULL), 0);
+  ASSERT_EQ(ceph_mount(cmount, NULL), 0);
+
+  char test_file[256];
+  sprintf(test_file, "test_perms_%d", getpid());
+
+  int fd = ceph_open(cmount, test_file, O_CREAT|O_RDWR, 0666);
+  ASSERT_GT(fd, 0);
+
+  // write some stuff
+  const char *bytes = "foobarbaz";
+  ASSERT_EQ(ceph_write(cmount, fd, bytes, strlen(bytes), 0), (int)strlen(bytes));
+
+  // set perms to read but can't write
+  ASSERT_EQ(ceph_fchmod(cmount, fd, 0400), 0);
+
+  char buf[100];
+  int ret = ceph_read(cmount, fd, buf, 100, 0);
+  ASSERT_EQ(ret, (int)strlen(bytes));
+  buf[ret] = '\0';
+  ASSERT_STREQ(buf, bytes);
+
+  ASSERT_EQ(ceph_write(cmount, fd, bytes, strlen(bytes), 0), (int)strlen(bytes));
+
+  ceph_close(cmount, fd);
+
+  ASSERT_EQ(ceph_open(cmount, test_file, O_RDWR, 0), -EACCES);
+
+  // reset back to writeable
+  ASSERT_EQ(ceph_chmod(cmount, test_file, 0600), 0);
+
+  fd = ceph_open(cmount, test_file, O_RDWR, 0);
+  ASSERT_GT(fd, 0);
+
+  ASSERT_EQ(ceph_write(cmount, fd, bytes, strlen(bytes), 0), (int)strlen(bytes));
+  ceph_close(cmount, fd);
+
+  ceph_shutdown(cmount);
+}
+
+TEST(LibCephFS, Symlinks) {
+  struct ceph_mount_info *cmount;
+  ASSERT_EQ(ceph_create(&cmount, NULL), 0);
+  ASSERT_EQ(ceph_conf_read_file(cmount, NULL), 0);
+  ASSERT_EQ(ceph_mount(cmount, NULL), 0);
+
+  char test_file[256];
+  sprintf(test_file, "test_symlinks_%d", getpid());
+
+  int fd = ceph_open(cmount, test_file, O_CREAT|O_RDWR, 0666);
+  ASSERT_GT(fd, 0);
+
+  ceph_close(cmount, fd);
+
+  char test_symlink[256];
+  sprintf(test_symlink, "test_symlinks_sym_%d", getpid());
+
+  ASSERT_EQ(ceph_symlink(cmount, test_file, test_symlink), 0);
+
+  // stat the original file
+  struct stat stbuf_orig;
+  ASSERT_EQ(ceph_stat(cmount, test_file, &stbuf_orig), 0);
+  // stat the symlink
+  struct stat stbuf_symlink_orig;
+  ASSERT_EQ(ceph_stat(cmount, test_symlink, &stbuf_symlink_orig), 0);
+  // ensure the stat bufs are equal
+  ASSERT_TRUE(!memcmp(&stbuf_orig, &stbuf_symlink_orig, sizeof(stbuf_orig)));
+
+  // test lstat
+  struct stat stbuf_symlink;
+  ASSERT_EQ(ceph_lstat(cmount, test_symlink, &stbuf_symlink), 0);
+  ASSERT_TRUE(S_ISLNK(stbuf_symlink.st_mode));
 
   ceph_shutdown(cmount);
 }

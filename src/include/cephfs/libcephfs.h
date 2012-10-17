@@ -450,6 +450,16 @@ int ceph_rename(struct ceph_mount_info *cmount, const char *from, const char *to
  * @param stbuf the stat struct that will be filled in with the file's statistics.
  * @returns 0 on success or negative error code on failure.
  */
+int ceph_stat(struct ceph_mount_info *cmount, const char *path, struct stat *stbuf);
+
+/**
+ * Get a file's statistics and attributes, without following symlinks.
+ *
+ * @param cmount the ceph mount handle to use for performing the stat.
+ * @param path the file or directory to get the statistics of.
+ * @param stbuf the stat struct that will be filled in with the file's statistics.
+ * @returns 0 on success or negative error code on failure.
+ */
 int ceph_lstat(struct ceph_mount_info *cmount, const char *path, struct stat *stbuf);
 
 /**
@@ -462,6 +472,7 @@ int ceph_lstat(struct ceph_mount_info *cmount, const char *path, struct stat *st
  * @returns 0 on success or negative error code on failure.
  */
 int ceph_setattr(struct ceph_mount_info *cmount, const char *relpath, struct stat *attr, int mask);
+
 /**
  * Change the mode bits (permissions) of a file/directory.
  *
@@ -473,6 +484,16 @@ int ceph_setattr(struct ceph_mount_info *cmount, const char *relpath, struct sta
 int ceph_chmod(struct ceph_mount_info *cmount, const char *path, mode_t mode);
 
 /**
+ * Change the mode bits (permissions) of an open file.
+ *
+ * @param cmount the ceph mount handle to use for performing the chmod.
+ * @param fd the open file descriptor to change the mode bits on.
+ * @param mode the new permissions to set.
+ * @returns 0 on success or a negative error code on failure.
+ */
+int ceph_fchmod(struct ceph_mount_info *cmount, int fd, mode_t mode);
+
+/**
  * Change the ownership of a file/directory.
  * 
  * @param cmount the ceph mount handle to use for performing the chown.
@@ -482,6 +503,17 @@ int ceph_chmod(struct ceph_mount_info *cmount, const char *path, mode_t mode);
  * @returns 0 on success or negative error code on failure.
  */
 int ceph_chown(struct ceph_mount_info *cmount, const char *path, uid_t uid, gid_t gid);
+
+/**
+ * Change the ownership of a file/directory, don't follow symlinks.
+ * 
+ * @param cmount the ceph mount handle to use for performing the chown.
+ * @param path the path of the file/directory to change the ownership of.
+ * @param uid the user id to set on the file/directory.
+ * @param gid the group id to set on the file/directory.
+ * @returns 0 on success or negative error code on failure.
+ */
+int ceph_lchown(struct ceph_mount_info *cmount, const char *path, uid_t uid, gid_t gid);
 
 /**
  * Change file/directory last access and modification times.
@@ -635,9 +667,9 @@ int ceph_getxattr(struct ceph_mount_info *cmount, const char *path, const char *
 	void *value, size_t size);
 
 /**
- * Get an extended attribute and follow symbolic links.  This function is
+ * Get an extended attribute wihtout following symbolic links.  This function is
  * identical to ceph_getxattr, but if the path refers to a symbolic link,
- * we get the extended attributes of the link target rather than the attributes
+ * we get the extended attributes of the symlink rather than the attributes
  * of the link itself.
  *
  * @param cmount the ceph mount handle to use for performing the lgetxattr.
@@ -662,7 +694,7 @@ int ceph_lgetxattr(struct ceph_mount_info *cmount, const char *path, const char 
 int ceph_listxattr(struct ceph_mount_info *cmount, const char *path, char *list, size_t size);
 
 /**
- * Get the list of extended attribute keys on a file, following symbolic links.
+ * Get the list of extended attribute keys on a file, but do not follow symbolic links.
  *
  * @param cmount the ceph mount handle to use for performing the llistxattr.
  * @param path the path to the file.
@@ -683,7 +715,7 @@ int ceph_llistxattr(struct ceph_mount_info *cmount, const char *path, char *list
 int ceph_removexattr(struct ceph_mount_info *cmount, const char *path, const char *name);
 
 /**
- * Remove the extended attribute from a file, following symbolic links.
+ * Remove the extended attribute from a file, do not follow symbolic links.
  *
  * @param cmount the ceph mount handle to use for performing the lremovexattr.
  * @param path the path to the file.
@@ -709,7 +741,7 @@ int ceph_setxattr(struct ceph_mount_info *cmount, const char *path, const char *
 	const void *value, size_t size, int flags);
 
 /**
- * Set an extended attribute on a file, following symbolic links.
+ * Set an extended attribute on a file, do not follow symbolic links.
  *
  * @param cmount the ceph mount handle to use for performing the lsetxattr.
  * @param path the path to the file.

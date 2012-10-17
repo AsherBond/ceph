@@ -3720,18 +3720,25 @@ int Client::path_walk(const filepath& origpath, Inode **final, bool followsym)
     int r = _lookup(cur, dname.c_str(), &next);
     if (r < 0)
       return r;
-    cur = next;
     if (i == path.depth() - 1 && followsym &&
-	cur && cur->is_symlink()) {
+	next && next->is_symlink()) {
       // resolve symlink
       if (cur->symlink[0] == '/') {
-	path = cur->symlink.c_str();
-	cur = root;
+	path = next->symlink.c_str();
+	next = root;
       } else {
-	filepath more(cur->symlink.c_str());
+	filepath more(next->symlink.c_str());
+	// we need to remove the symlink component from off of the path
+	// before adding the target that the symlink points to
+	path.pop_dentry();
 	path.append(more);
+	// reset position in path walk
+	--i;
+	// remain at the same inode
+	next = cur;
       }
     }
+    cur = next;
   }
   if (!cur)
     return -ENOENT;
@@ -4103,6 +4110,28 @@ int Client::setattr(const char *relpath, struct stat *attr, int mask)
   return _setattr(in, attr, mask); 
 }
 
+int Client::stat(const char *relpath, struct stat *stbuf,
+			  frag_info_t *dirstat, int mask)
+{
+  ldout(cct, 3) << "stat enter (relpath" << relpath << " mask " << mask << ")" << dendl;
+  Mutex::Locker lock(client_lock);
+  tout(cct) << "stat" << std::endl;
+  tout(cct) << relpath << std::endl;
+  filepath path(relpath);
+  Inode *in;
+  int r = path_walk(path, &in);
+  if (r < 0)
+    return r;
+  r = _getattr(in, mask);
+  if (r < 0) {
+    ldout(cct, 3) << "stat exit on error!" << dendl;
+    return r;
+  }
+  fill_stat(in, stbuf, dirstat);
+  ldout(cct, 3) << "stat exit (relpath" << relpath << " mask " << mask << ")" << dendl;
+  return r;
+}
+
 int Client::lstat(const char *relpath, struct stat *stbuf,
 			  frag_info_t *dirstat, int mask)
 {
@@ -4112,7 +4141,8 @@ int Client::lstat(const char *relpath, struct stat *stbuf,
   tout(cct) << relpath << std::endl;
   filepath path(relpath);
   Inode *in;
-  int r = path_walk(path, &in);
+  // don't follow symlinks
+  int r = path_walk(path, &in, false);
   if (r < 0)
     return r;
   r = _getattr(in, mask);
@@ -4188,6 +4218,19 @@ int Client::chmod(const char *relpath, mode_t mode)
   return _setattr(in, &attr, CEPH_SETATTR_MODE);
 }
 
+int Client::fchmod(int fd, mode_t mode)
+{
+  Mutex::Locker lock(client_lock);
+  tout(cct) << "fchmod" << std::endl;
+  tout(cct) << fd << std::endl;
+  tout(cct) << mode << std::endl;
+  assert(fd_map.count(fd));
+  Fh *f = fd_map[fd];
+  struct stat attr;
+  attr.st_mode = mode;
+  return _setattr(f->inode, &attr, CEPH_SETATTR_MODE);
+}
+
 int Client::chown(const char *relpath, uid_t uid, gid_t gid)
 {
   Mutex::Locker lock(client_lock);
@@ -4198,6 +4241,25 @@ int Client::chown(const char *relpath, uid_t uid, gid_t gid)
   filepath path(relpath);
   Inode *in;
   int r = path_walk(path, &in);
+  if (r < 0)
+    return r;
+  struct stat attr;
+  attr.st_uid = uid;
+  attr.st_gid = gid;
+  return _setattr(in, &attr, CEPH_SETATTR_UID|CEPH_SETATTR_GID);
+}
+
+int Client::lchown(const char *relpath, uid_t uid, gid_t gid)
+{
+  Mutex::Locker lock(client_lock);
+  tout(cct) << "chown" << std::endl;
+  tout(cct) << relpath << std::endl;
+  tout(cct) << uid << std::endl;
+  tout(cct) << gid << std::endl;
+  filepath path(relpath);
+  Inode *in;
+  // don't follow symlinks
+  int r = path_walk(path, &in, false);
   if (r < 0)
     return r;
   struct stat attr;

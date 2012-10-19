@@ -104,6 +104,7 @@ void usage()
 "  lock list <image-name>                      show locks held on an image\n"
 "  lock add <image-name> <id> [--shared <tag>] take a lock called id on an image\n"
 "  lock remove <image-name> <id> <locker>      release a lock on an image\n"
+"  bench-write <image-name> --io-size <bytes> --io-threads <num> --io-total <bytes>\n"
 "\n"
 "<image-name>, <snap-name> are [pool/]name[@snap], or you may specify\n"
 "individual pieces of names with -p/--pool, --image, and/or --snap.\n"
@@ -255,16 +256,27 @@ static int do_list(librbd::RBD &rbd, librados::IoCtx& io_ctx, bool lflag)
 
 static int do_create(librbd::RBD &rbd, librados::IoCtx& io_ctx,
 		     const char *imgname, uint64_t size, int *order,
-		     int format, uint64_t features)
+		     int format, uint64_t features,
+		     uint64_t stripe_unit, uint64_t stripe_count)
 {
   int r;
-  if (features == 0)
-    features = RBD_FEATURES_ALL;
 
-  if (format == 1)
+  if (format == 1) {
+    // weird striping not allowed with format 1!
+    if ((stripe_unit || stripe_count) &&
+	(stripe_unit != (1ull << *order) && stripe_count != 1)) {
+      cerr << "non-default striping not allowed with format 1; use --format 2" << std::endl;
+      return -EINVAL;
+    }
     r = rbd.create(io_ctx, imgname, size, order);
-  else
-    r = rbd.create2(io_ctx, imgname, size, features, order);
+  } else {
+    if (features == 0) {
+      features = RBD_FEATURE_LAYERING;
+    }
+    if (stripe_unit != (1ull << *order) && stripe_count != 1)
+      features |= RBD_FEATURE_STRIPINGV2;
+    r = rbd.create3(io_ctx, imgname, size, features, order, stripe_unit, stripe_count);
+  }
   if (r < 0)
     return r;
   return 0;
@@ -313,6 +325,7 @@ static int do_show_info(const char *imgname, librbd::Image& image,
   uint8_t old_format;
   uint64_t overlap, features;
   bool snap_protected;
+
   int r = image.stat(info, sizeof(info));
   if (r < 0)
     return r;
@@ -346,7 +359,6 @@ static int do_show_info(const char *imgname, librbd::Image& image,
        << std::endl
        << "\tformat: " << (old_format ? "1" : "2")
        << std::endl;
-
   if (!old_format) {
     cout << "\tfeatures: " << feature_str(features) << std::endl;
   }
@@ -364,6 +376,12 @@ static int do_show_info(const char *imgname, librbd::Image& image,
     cout << "\tparent: " << parent_pool << "/" << parent_name
 	 << "@" << parent_snapname << std::endl;
     cout << "\toverlap: " << prettybyte_t(overlap) << std::endl;
+  }
+
+  // striping info, if feature is set
+  if (features & RBD_FEATURE_STRIPINGV2) {
+    cout << "\tstripe unit: " << prettybyte_t(image.get_stripe_unit()) << std::endl
+	 << "\tstripe count: " << prettybyte_t(image.get_stripe_count()) << std::endl;
   }
   return 0;
 }
@@ -540,6 +558,103 @@ static int do_lock_remove(librbd::Image& image, const char *client,
   return image.break_lock(client, cookie);
 }
 
+static void rbd_bencher_completion(void *c, void *pc);
+
+struct rbd_bencher;
+
+struct rbd_bencher {
+  librbd::Image *image;
+  Mutex lock;
+  Cond cond;
+  int in_flight;
+
+  rbd_bencher(librbd::Image *i)
+    : image(i),
+      lock("rbd_bencher::lock"),
+      in_flight(0)
+  { }
+
+  bool start_write(int max, uint64_t off, uint64_t len, bufferlist& bl) {
+    Mutex::Locker l(lock);
+    if (in_flight >= max)
+      return false;
+    in_flight++;
+    librbd::RBD::AioCompletion *c = new librbd::RBD::AioCompletion((void *)this, rbd_bencher_completion);
+    image->aio_write(off, len, bl, c);
+    //cout << "start " << c << " at " << off << "~" << len << std::endl;
+    return true;
+  }
+
+  void wait_for(int max) {
+    Mutex::Locker l(lock);
+    while (in_flight > max) {
+      utime_t dur;
+      dur.set_from_double(.2);
+      cond.WaitInterval(g_ceph_context, lock, dur);
+    }
+  }
+
+};
+
+void rbd_bencher_completion(void *vc, void *pc)
+{
+  librbd::RBD::AioCompletion *c = (librbd::RBD::AioCompletion *)vc;
+  rbd_bencher *b = (rbd_bencher *)pc;
+  //cout << "complete " << c << std::endl;
+  b->lock.Lock();
+  b->in_flight--;
+  b->cond.Signal();
+  b->lock.Unlock();
+  c->release();
+}
+
+static int do_bench_write(librbd::Image& image, uint64_t io_size, uint64_t io_threads, uint64_t io_bytes)
+{
+  rbd_bencher b(&image);
+
+  cout << "bench-write "
+       << " io_size " << io_size
+       << " io_threads " << io_threads
+       << " bytes " << io_bytes
+       << std::endl;
+
+  bufferptr bp(io_size);
+  bp.zero();
+  bufferlist bl;
+  bl.push_back(bp);
+
+  utime_t start = ceph_clock_now(NULL);
+  utime_t last;
+  unsigned ios = 0;
+
+  printf("  SEC       OPS   OPS/SEC   BYTES/SEC\n");
+  uint64_t off;
+  for (off = 0; off < io_bytes; off += io_size) {
+    b.wait_for(io_threads - 1);
+    while (b.start_write(io_threads, off, io_size, bl))
+      ios++;
+
+    utime_t now = ceph_clock_now(NULL);
+    utime_t elapsed = now - start;
+    if (elapsed.sec() != last.sec()) {
+      printf("%5d  %8d  %8.2lf  %8.2lf\n", (int)elapsed, (int)(ios - io_threads),
+	     (double)(ios - io_threads) / elapsed,
+	     (double)(off - io_threads * io_size) / elapsed);
+      last = elapsed;
+    }
+  }
+  b.wait_for(0);
+
+  utime_t now = ceph_clock_now(NULL);
+  double elapsed = now - start;
+
+  printf("elapsed: %5d  ops: %8d  ops/sec: %8.2lf  bytes/sec: %8.2lf\n", (int)elapsed, ios,
+	     (double)ios / elapsed,
+	     (double)off / elapsed);
+
+  return 0;
+}
+
 struct ExportContext {
   int fd;
   MyProgressContext pc;
@@ -701,7 +816,7 @@ static int do_import(librbd::RBD &rbd, librados::IoCtx& io_ctx,
 
   assert(imgname);
 
-  r = do_create(rbd, io_ctx, imgname, size, order, format, features);
+  r = do_create(rbd, io_ctx, imgname, size, order, format, features, 0, 0);
   if (r < 0) {
     cerr << "rbd: image creation failed" << std::endl;
     close(fd);
@@ -1174,6 +1289,7 @@ enum {
   OPT_LOCK_LIST,
   OPT_LOCK_ADD,
   OPT_LOCK_REMOVE,
+  OPT_BENCH_WRITE,
 };
 
 static int get_cmd(const char *cmd, bool snapcmd, bool lockcmd)
@@ -1214,6 +1330,8 @@ static int get_cmd(const char *cmd, bool snapcmd, bool lockcmd)
       return OPT_SHOWMAPPED;
     if (strcmp(cmd, "unmap") == 0)
       return OPT_UNMAP;
+    if (strcmp(cmd, "bench-write") == 0)
+      return OPT_BENCH_WRITE;
   } else if (snapcmd) {
     if (strcmp(cmd, "create") == 0 ||
         strcmp(cmd, "add") == 0)
@@ -1293,6 +1411,8 @@ int main(int argc, const char **argv)
     *devpath = NULL, *lock_cookie = NULL, *lock_client = NULL,
     *lock_tag = NULL;
   bool lflag = false;
+  long long stripe_unit = 0, stripe_count = 0;
+  long long bench_io_size = 4096, bench_io_threads = 16, bench_bytes = 1 << 30;
 
   std::string val;
   std::ostringstream err;
@@ -1337,11 +1457,17 @@ int main(int argc, const char **argv)
       size = sizell << 20;   // bytes to MB
     } else if (ceph_argparse_flag(args, i, "-l", "--long", (char*)NULL)) {
       lflag = true;
+    } else if (ceph_argparse_withlonglong(args, i, &stripe_unit, &err, "--stripe-unit", (char*)NULL)) {
+    } else if (ceph_argparse_withlonglong(args, i, &stripe_count, &err, "--stripe-count", (char*)NULL)) {
     } else if (ceph_argparse_withint(args, i, &order, &err, "--order", (char*)NULL)) {
       if (!err.str().empty()) {
 	cerr << "rbd: " << err.str() << std::endl;
 	return EXIT_FAILURE;
       }
+    } else if (ceph_argparse_withlonglong(args, i, &bench_io_size, &err, "--io-size", (char*)NULL)) {
+    } else if (ceph_argparse_withlonglong(args, i, &bench_io_threads, &err, "--io-threads", (char*)NULL)) {
+    } else if (ceph_argparse_withlonglong(args, i, &bench_bytes, &err, "--io-total", (char*)NULL)) {
+    } else if (ceph_argparse_withlonglong(args, i, &stripe_count, &err, "--stripe-count", (char*)NULL)) {
     } else if (ceph_argparse_witharg(args, i, &val, "--path", (char*)NULL)) {
       path = strdup(val.c_str());
     } else if (ceph_argparse_witharg(args, i, &val, "--dest", (char*)NULL)) {
@@ -1414,6 +1540,7 @@ if (!set_conf_param(v, p1, p2, p3)) { \
       case OPT_SNAP_UNPROTECT:
       case OPT_WATCH:
       case OPT_MAP:
+      case OPT_BENCH_WRITE:
       case OPT_LOCK_LIST:
 	SET_CONF_PARAM(v, &imgname, NULL, NULL);
 	break;
@@ -1587,7 +1714,7 @@ if (!set_conf_param(v, p1, p2, p3)) { \
        opt_cmd == OPT_WATCH || opt_cmd == OPT_COPY ||
        opt_cmd == OPT_FLATTEN || opt_cmd == OPT_CHILDREN ||
        opt_cmd == OPT_LOCK_LIST || opt_cmd == OPT_LOCK_ADD ||
-       opt_cmd == OPT_LOCK_REMOVE)) {
+       opt_cmd == OPT_LOCK_REMOVE || opt_cmd == OPT_BENCH_WRITE)) {
     r = rbd.open(io_ctx, image, imgname);
     if (r < 0) {
       cerr << "rbd: error opening image " << imgname << ": "
@@ -1643,7 +1770,12 @@ if (!set_conf_param(v, p1, p2, p3)) { \
 	   << std::endl;
       return EXIT_FAILURE;
     }
-    r = do_create(rbd, io_ctx, imgname, size, &order, format, features);
+    if ((stripe_unit && !stripe_count) || (!stripe_unit && stripe_count)) {
+      cerr << "must specify both (or neither) of stripe-unit and stripe-count" << std::endl;
+      usage();
+      return EXIT_FAILURE;
+    }
+    r = do_create(rbd, io_ctx, imgname, size, &order, format, features, stripe_unit, stripe_count);
     if (r < 0) {
       cerr << "rbd: create error: " << cpp_strerror(-r) << std::endl;
       return EXIT_FAILURE;
@@ -1913,6 +2045,14 @@ if (!set_conf_param(v, p1, p2, p3)) { \
     r = do_lock_remove(image, lock_cookie, lock_client);
     if (r < 0) {
       cerr << "rbd: releasing lock failed: " << cpp_strerror(r) << std::endl;
+      return EXIT_FAILURE;
+    }
+    break;
+
+  case OPT_BENCH_WRITE:
+    r = do_bench_write(image, bench_io_size, bench_io_threads, bench_bytes);
+    if (r < 0) {
+      cerr << "bench-write failed: " << cpp_strerror(-r) << std::endl;
       return EXIT_FAILURE;
     }
     break;

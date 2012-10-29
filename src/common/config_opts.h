@@ -147,6 +147,8 @@ OPTION(auth_cluster_required, OPT_STR, "cephx")   // required of mon, mds, osd d
 OPTION(auth_service_required, OPT_STR, "cephx")   // required by daemons of clients
 OPTION(auth_client_required, OPT_STR, "")         // what clients require of daemons
 OPTION(auth_supported, OPT_STR, "")               // deprecated; default value for above if they are not defined.
+OPTION(cephx_require_signatures, OPT_BOOL, false) //  If true, don't talk to Cephx partners if they don't support message signing; off by default
+OPTION(cephx_sign_messages, OPT_BOOL, true)  // Default to signing session messages if supported
 OPTION(auth_mon_ticket_ttl, OPT_DOUBLE, 60*60*12)
 OPTION(auth_service_ticket_ttl, OPT_DOUBLE, 60*60)
 OPTION(mon_client_hunt_interval, OPT_DOUBLE, 3.0)   // try new mon every N seconds until we connect
@@ -172,6 +174,7 @@ OPTION(client_oc_size, OPT_INT, 1024*1024* 200)    // MB * n
 OPTION(client_oc_max_dirty, OPT_INT, 1024*1024* 100)    // MB * n  (dirty OR tx.. bigish)
 OPTION(client_oc_target_dirty, OPT_INT, 1024*1024* 8) // target dirty (keep this smallish)
 OPTION(client_oc_max_dirty_age, OPT_DOUBLE, 5.0)      // max age in cache before writeback
+OPTION(client_oc_max_objects, OPT_INT, 1000)      // max objects in cache
 // note: the max amount of "in flight" dirty data is roughly (max - target)
 OPTION(fuse_use_invalidate_cb, OPT_BOOL, false) // use fuse 2.8+ invalidate callback to keep page cache consistent
 OPTION(fuse_big_writes, OPT_BOOL, true)

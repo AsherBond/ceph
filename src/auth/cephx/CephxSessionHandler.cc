@@ -20,6 +20,7 @@
 
 #include "common/config.h"
 #include "include/assert.h"
+#include "include/ceph_features.h"
 
 #define dout_subsys ceph_subsys_auth
 
@@ -77,6 +78,11 @@ int CephxSessionHandler::check_message_signature(Message *m)
 
   // If runtime signing option is off, just return success without checking signature.
   if (!cct->_conf->cephx_sign_messages) {
+    return 0;
+  }
+
+  if ((features & CEPH_FEATURE_MSG_AUTH) == 0) {
+    // it's fine, we didn't negotiate this feature.
     return 0;
   }
 

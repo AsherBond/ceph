@@ -302,8 +302,9 @@ int Pipe::accept()
     // If the server supports signing session messages, and it is configured to require the client
     // to sign, and the client can't sign, bail out.  PLR
 
-    if ((policy.features_supported & CEPH_FEATURE_MSG_AUTH) && msgr->cct->_conf->cephx_require_signatures 
-      && !(connect.features & CEPH_FEATURE_MSG_AUTH)) {
+    if ((policy.features_supported & CEPH_FEATURE_MSG_AUTH) &&
+	msgr->cct->_conf->cephx_require_signatures &&
+	!(connect.features & CEPH_FEATURE_MSG_AUTH)) {
       ldout(msgr->cct,1) << "Client can't sign messages." << dendl;
       reply.tag = CEPH_MSGR_TAG_FEATURES;
       msgr->lock.Unlock();
@@ -879,11 +880,12 @@ int Pipe::connect()
 	goto fail_locked;
       }
 
-    // If the client supports signing session messages, and it is configured to require the server
-    // to sign, and the server can't sign, bail out.  PLR
+      // If the client supports signing session messages, and it is configured to require the server
+      // to sign, and the server can't sign, bail out.  PLR
 
-      if ((policy.features_supported & CEPH_FEATURE_MSG_AUTH) && msgr->cct->_conf->cephx_require_signatures 
-          && !(reply.features & CEPH_FEATURE_MSG_AUTH)) {
+      if ((policy.features_supported & CEPH_FEATURE_MSG_AUTH) &&
+	  msgr->cct->_conf->cephx_require_signatures &&
+          !(reply.features & CEPH_FEATURE_MSG_AUTH)) {
         ldout(msgr->cct,1) << "Server can't sign messages." << dendl;
         goto fail_locked;
       }
@@ -1103,15 +1105,18 @@ void Pipe::fault(bool onread)
 
 int Pipe::randomize_out_seq()
 {
-  // Set out_seq to a random value, so CRC won't be predictable.   Don't bother checking seq_error 
-  // here.  We'll check it on the call.  PLR
-
-  int seq_error = get_random_bytes((char *)&out_seq, sizeof(out_seq));
-
-
-  out_seq &= SEQ_MASK;
-  lsubdout(msgr->cct, ms, 10) << "randomize_out_seq " << out_seq << dendl;
-  return seq_error;
+  if (connection_state->get_features() & CEPH_FEATURE_MSG_AUTH) {
+    // Set out_seq to a random value, so CRC won't be predictable.   Don't bother checking seq_error
+    // here.  We'll check it on the call.  PLR
+    int seq_error = get_random_bytes((char *)&out_seq, sizeof(out_seq));
+    out_seq &= SEQ_MASK;
+    lsubdout(msgr->cct, ms, 10) << "randomize_out_seq " << out_seq << dendl;
+    return seq_error;
+  } else {
+    // previously, seq #'s always started at 0.
+    out_seq = 0;
+    return 0;
+  }
 }
 
 void Pipe::was_session_reset()

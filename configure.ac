@@ -9,6 +9,11 @@ AC_PREREQ(2.59)
 # VERSION define is not used by the code.  It gets a version string
 # from 'git describe'; see src/ceph_ver.[ch]
 AC_INIT([ceph], [0.53], [ceph-devel@vger.kernel.org])
+
+# Create release string.  Used with VERSION for RPMs.
+AC_SUBST(RPM_RELEASE)
+RPM_RELEASE=`if expr index $(git describe --always) '-' > /dev/null ; then git describe --always | cut -d- -f2- | tr '-' '.' ; fi`
+
 AC_CONFIG_MACRO_DIR([m4])
 
 AC_CONFIG_SUBDIRS([src/gtest])
@@ -282,6 +287,22 @@ AS_IF([test "x$enable_cephfs_java" = "xyes"], [
 		   jnih=`find $dir -name jni.h | head -n 1`
 		   AS_IF([test -r "$jnih"], [
 				  EXTRA_JDK_INC_DIR=`dirname $jnih`])])
+
+  # cephfs_java_test only makes sense if java is already turned on
+	# setup CLASSPATH for Debian default junit4.jar package 
+    #
+    # Configuring --with-debug and --enable-cephfs-java will throw an error if
+    # JUnit4 cannot be found. While currently this works for users who have
+    # installed via the package manager on Ubuntu, we need to expand this
+    # check to 1) support other distrubtions and 2) allow users to influence
+    # the search path.
+  AS_IF([test "x$with_debug" = "xyes"], [
+      dir='/usr/share/java'
+      junit4_jar=`find $dir -name junit4.jar | head -n 1`
+		  AS_IF([test -r "$junit4_jar"], [
+	      EXTRA_CLASSPATH_JAR=`dirname $junit4_jar`/junit4.jar
+      AC_SUBST(EXTRA_CLASSPATH_JAR)], [
+      AC_MSG_ERROR([Cannot find junit4.jar (apt-get install junit4)])])])
 
 	# Check for Java programs: javac, javah, jar
     PATH_save=$PATH

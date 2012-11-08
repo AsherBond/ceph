@@ -695,7 +695,7 @@ void pg_pool_t::encode(bufferlist& bl, uint64_t features) const
     return;
   }
 
-  ENCODE_START(6, 5, bl);
+  ENCODE_START(7, 5, bl);
   ::encode(type, bl);
   ::encode(size, bl);
   ::encode(crush_ruleset, bl);
@@ -713,12 +713,13 @@ void pg_pool_t::encode(bufferlist& bl, uint64_t features) const
   ::encode(auid, bl);
   ::encode(flags, bl);
   ::encode(crash_replay_interval, bl);
+  ::encode(min_size, bl);
   ENCODE_FINISH(bl);
 }
 
 void pg_pool_t::decode(bufferlist::iterator& bl)
 {
-  DECODE_START_LEGACY_COMPAT_LEN(6, 5, 5, bl);
+  DECODE_START_LEGACY_COMPAT_LEN(7, 5, 5, bl);
   ::decode(type, bl);
   ::decode(size, bl);
   ::decode(crush_ruleset, bl);
@@ -761,6 +762,11 @@ void pg_pool_t::decode(bufferlist::iterator& bl)
       crash_replay_interval = 60;
     else
       crash_replay_interval = 0;
+  }
+  if (struct_v >= 7) {
+    ::decode(min_size, bl);
+  } else {
+    min_size = MAX(size - 1, 1);
   }
   DECODE_FINISH(bl);
   calc_pg_masks();
@@ -1462,18 +1468,23 @@ bool pg_interval_t::check_new_interval(
   epoch_t last_epoch_clean,
   OSDMapRef osdmap,
   OSDMapRef lastmap,
+  int64_t pool_id,
   map<epoch_t, pg_interval_t> *past_intervals,
   std::ostream *out)
 {
   // remember past interval
-  if (new_acting != old_acting || new_up != old_up) {
+  if (new_acting != old_acting || new_up != old_up ||
+      (!(lastmap->get_pools().count(pool_id))) ||
+      lastmap->get_pools().find(pool_id)->second.min_size !=
+      osdmap->get_pools().find(pool_id)->second.min_size) {
     pg_interval_t& i = (*past_intervals)[same_interval_since];
     i.first = same_interval_since;
     i.last = osdmap->get_epoch() - 1;
     i.acting = old_acting;
     i.up = old_up;
 
-    if (i.acting.size()) {
+    if (i.acting.size() >=
+	osdmap->get_pools().find(pool_id)->second.min_size) {
       if (lastmap->get_up_thru(i.acting[0]) >= i.first &&
 	  lastmap->get_up_from(i.acting[0]) <= i.first) {
 	i.maybe_went_rw = true;
@@ -1587,15 +1598,30 @@ void pg_query_t::generate_test_instances(list<pg_query_t*>& o)
 
 void pg_log_entry_t::encode(bufferlist &bl) const
 {
-  ENCODE_START(5, 4, bl);
+  ENCODE_START(6, 4, bl);
   ::encode(op, bl);
   ::encode(soid, bl);
   ::encode(version, bl);
-  ::encode(prior_version, bl);
+
+  /**
+   * Added with reverting_to:
+   * Previous code used prior_version to encode
+   * what we now call reverting_to.  This will
+   * allow older code to decode reverting_to
+   * into prior_version as expected.
+   */
+  if (op == LOST_REVERT)
+    ::encode(reverting_to, bl);
+  else
+    ::encode(prior_version, bl);
+
   ::encode(reqid, bl);
   ::encode(mtime, bl);
   if (op == CLONE)
     ::encode(snaps, bl);
+
+  if (op == LOST_REVERT)
+    ::encode(prior_version, bl);
   ENCODE_FINISH(bl);
 }
 
@@ -1615,13 +1641,27 @@ void pg_log_entry_t::decode(bufferlist::iterator &bl)
   if (struct_v < 3)
     invalid_hash = true;
   ::decode(version, bl);
-  ::decode(prior_version, bl);
+
+  if (struct_v >= 6 && op == LOST_REVERT)
+    ::decode(reverting_to, bl);
+  else
+    ::decode(prior_version, bl);
+
   ::decode(reqid, bl);
   ::decode(mtime, bl);
   if (op == CLONE)
     ::decode(snaps, bl);
   if (struct_v < 5)
     invalid_pool = true;
+
+  if (op == LOST_REVERT) {
+    if (struct_v >= 6) {
+      ::decode(prior_version, bl);
+    } else {
+      reverting_to = prior_version;
+    }
+  }
+
   DECODE_FINISH(bl);
 }
 

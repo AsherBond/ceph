@@ -14,19 +14,23 @@ use Exporter;
 #==variables ===
 my $rgw_user = "qa_user";
 
+# function to execute the command and return output
+sub get_cmd_op
+{
+    my $cmd = shift;
+    my $excmd = `$cmd`;
+    return $excmd;
+}
+
 # Function to check if radosgw is already running
 sub get_status {
-        my $service = "radosgw";
-        my $cmd = "ps -ef | grep $service | grep -v grep";
-        my $status = get_cmd_op($cmd);
-        if (!$status) {
-                my $cmd1 = "echo $?";
-                my $status1 = get_cmd_op($cmd1);
-                if (!$status1){
-                        return 0;
-                }
-        }
-        return 1;
+    my $service = "radosgw";
+    my $cmd = "ps -ef | grep $service | grep -v grep";
+    my $status = get_cmd_op($cmd);
+    if ($status =~ /client.radosgw.gateway/ ){
+        return 0;
+    }
+    return 1;
 }
 
 #Function that executes the CLI commands and returns the output of the command

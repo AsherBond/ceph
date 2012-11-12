@@ -479,6 +479,7 @@ namespace librbd {
 	return -ENOENT;
 
       parent_spec our_pspec;
+      Mutex::Locker l3(ictx->parent_lock);
       r = ictx->get_parent_spec(snap_id, &our_pspec);
       if (r < 0) {
 	lderr(ictx->cct) << "snap_remove: can't get parent spec" << dendl;
@@ -672,8 +673,8 @@ reprotect_and_return_err:
     // make sure it doesn't already exist, in either format
     int r = detect_format(io_ctx, imgname, NULL, NULL);
     if (r != -ENOENT) {
-      lderr(cct) << "rbd image " << imgname << " already exists" << dendl;
-      return -EEXIST;
+      lderr(cct) << "Could not tell if " << imgname << " already exists" << dendl;
+      return r;
     }
 
     if (!order)
@@ -1226,13 +1227,11 @@ reprotect_and_return_err:
       parent_info parent_info = ictx->parent_md;
       ictx->parent_lock.Unlock();
 
-      if (scan_for_parents(ictx, parent_info.spec, CEPH_NOSNAP) == -ENOENT) {
-	r = cls_client::remove_child(&ictx->md_ctx, RBD_CHILDREN,
-				     parent_info.spec, id);
-	if (r < 0 && r != -ENOENT) {
-	  lderr(cct) << "error removing child from children list" << dendl;
-	  return r;
-	}
+      r = cls_client::remove_child(&ictx->md_ctx, RBD_CHILDREN,
+				   parent_info.spec, id);
+      if (r < 0 && r != -ENOENT) {
+	lderr(cct) << "error removing child from children list" << dendl;
+	return r;
       }
       close_image(ictx);
 
@@ -2468,7 +2467,7 @@ reprotect_and_return_err:
       total_write += bl.length();
     }
   done:
-    c->finish_adding_requests();
+    c->finish_adding_requests(ictx->cct);
     c->put();
 
     ictx->perfcounter->inc(l_librbd_aio_wr);
@@ -2549,7 +2548,7 @@ reprotect_and_return_err:
     if (ictx->object_cacher)
       ictx->object_cacher->discard_set(ictx->object_set, extents);
 
-    c->finish_adding_requests();
+    c->finish_adding_requests(ictx->cct);
     c->put();
 
     ictx->perfcounter->inc(l_librbd_aio_discard);
@@ -2578,7 +2577,7 @@ reprotect_and_return_err:
   int aio_read(ImageCtx *ictx, const vector<pair<uint64_t,uint64_t> >& image_extents,
 	       char *buf, bufferlist *pbl, AioCompletion *c)
   {
-    ldout(ictx->cct, 20) << "aio_read " << ictx << " " << image_extents << dendl;
+    ldout(ictx->cct, 20) << "aio_read " << ictx << " completion " << c << " " << image_extents << dendl;
 
     int r = ictx_check(ictx);
     if (r < 0)
@@ -2627,13 +2626,7 @@ reprotect_and_return_err:
 	c->add_request();
 
 	if (ictx->object_cacher) {
-	  // cache has already handled possible reading from parent, so
-	  // this AioRead is just used to pass data to the
-	  // AioCompletion. The AioRead isn't being used as a
-	  // completion, so wrap the completion in a C_CacheRead to
-	  // delete it
 	  C_CacheRead *cache_comp = new C_CacheRead(req_comp, req);
-	  req->m_ext_map[q->offset] = q->length;
 	  ictx->aio_read_from_cache(q->oid, &req->data(),
 				    q->length, q->offset,
 				    cache_comp);
@@ -2650,7 +2643,7 @@ reprotect_and_return_err:
     }
     ret = buffer_ofs;
   done:
-    c->finish_adding_requests();
+    c->finish_adding_requests(ictx->cct);
     c->put();
 
     ictx->perfcounter->inc(l_librbd_aio_rd);

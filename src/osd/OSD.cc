@@ -3137,12 +3137,12 @@ void OSD::do_waiters()
 
     finished_lock.Unlock();
     
-    dout(2) << "do_waiters -- start" << dendl;
+    dout(10) << "do_waiters -- start" << dendl;
     for (list<OpRequestRef>::iterator it = waiting.begin();
          it != waiting.end();
          it++)
       dispatch_op(*it);
-    dout(2) << "do_waiters -- finish" << dendl;
+    dout(10) << "do_waiters -- finish" << dendl;
   }
 }
 
@@ -5440,6 +5440,14 @@ void OSD::handle_op(OpRequestRef op)
   if (r) {
     service.reply_op_error(op, r);
     return;
+  }
+
+  if (g_conf->osd_debug_drop_op_probability > 0 &&
+      !m->get_source().is_mds()) {
+    if ((double)rand() / (double)RAND_MAX < g_conf->osd_debug_drop_op_probability) {
+      dout(0) << "handle_op DEBUG artificially dropping op " << *m << dendl;
+      return;
+    }
   }
 
   if (m->may_write()) {

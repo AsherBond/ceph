@@ -654,6 +654,15 @@ int FileStore::mkfs()
     goto close_fsid_fd;
   }
 
+  struct statfs basefs;
+  ret = ::fstatfs(basedir_fd, &basefs);
+  if (ret < 0) {
+    ret = -errno;
+    derr << "mkfs cannot fstatfs basedir "
+	 << cpp_strerror(ret) << dendl;
+    goto close_fsid_fd;
+  }
+
   // current
   ret = ::stat(current_fn.c_str(), &st);
   if (ret == 0) {
@@ -668,18 +677,11 @@ int FileStore::mkfs()
     // is current/ a btrfs subvolume?
     //  check fsid, and compare st_dev to see if it's a subvolume.
     struct stat basest;
-    struct statfs basefs, currentfs;
+    struct statfs currentfs;
     ret = ::fstat(basedir_fd, &basest);
     if (ret < 0) {
       ret = -errno;
       derr << "mkfs cannot fstat basedir "
-	   << cpp_strerror(ret) << dendl;
-      goto close_fsid_fd;
-    }
-    ret = ::fstatfs(basedir_fd, &basefs);
-    if (ret < 0) {
-      ret = -errno;
-      derr << "mkfs cannot fstatfs basedir "
 	   << cpp_strerror(ret) << dendl;
       goto close_fsid_fd;
     }
@@ -699,40 +701,34 @@ int FileStore::mkfs()
 #endif
   } else {
 #if defined(__linux__)
-    volargs.fd = 0;
-    strcpy(volargs.name, "current");
-    if (::ioctl(basedir_fd, BTRFS_IOC_SUBVOL_CREATE, (unsigned long int)&volargs)) {
-      ret = -errno;
-      if (ret == -EOPNOTSUPP || ret == -ENOTTY) {
-	dout(2) << " BTRFS_IOC_SUBVOL_CREATE ioctl failed, trying mkdir "
-		<< current_fn << dendl;
-#endif
-	if (::mkdir(current_fn.c_str(), 0755)) {
-	  ret = -errno;
-	  derr << "mkfs: mkdir " << current_fn << " failed: "
-	       << cpp_strerror(ret) << dendl;
-	  goto close_fsid_fd;
-	}
-#if defined(__linux__)
-      }
-      else {
+    if (basefs.f_type == BTRFS_SUPER_MAGIC) {
+      volargs.fd = 0;
+      strcpy(volargs.name, "current");
+      if (::ioctl(basedir_fd, BTRFS_IOC_SUBVOL_CREATE, (unsigned long int)&volargs) < 0) {
+	ret = -errno;
 	derr << "mkfs: BTRFS_IOC_SUBVOL_CREATE failed with error "
 	     << cpp_strerror(ret) << dendl;
 	goto close_fsid_fd;
       }
-    }
-    else {
-      // ioctl succeeded. yay
+
       dout(2) << " created btrfs subvol " << current_fn << dendl;
-      if (::chmod(current_fn.c_str(), 0755)) {
+      if (::chmod(current_fn.c_str(), 0755) < 0) {
 	ret = -errno;
 	derr << "mkfs: failed to chmod " << current_fn << " to 0755: "
 	     << cpp_strerror(ret) << dendl;
 	goto close_fsid_fd;
       }
       btrfs_stable_commits = true;
-    }
+    } else
 #endif
+    {
+      if (::mkdir(current_fn.c_str(), 0755) < 0) {
+	ret = -errno;
+	derr << "mkfs: mkdir " << current_fn << " failed: "
+	     << cpp_strerror(ret) << dendl;
+	goto close_fsid_fd;
+      }
+    }
   }
 
   // write initial op_seq
@@ -3784,7 +3780,7 @@ int FileStore::_setattrs(coll_t cid, const hobject_t& oid, map<string,bufferptr>
 	  inline_set.erase(p->first);
 	  r = chain_fremovexattr(fd, n);
 	  if (r < 0)
-	    return r;
+	    goto out_close;
 	}
 	omap_set[p->first].push_back(p->second);
 	continue;
@@ -3796,7 +3792,7 @@ int FileStore::_setattrs(coll_t cid, const hobject_t& oid, map<string,bufferptr>
 	  inline_set.erase(p->first);
 	  r = chain_fremovexattr(fd, n);
 	  if (r < 0)
-	    return r;
+	    goto out_close;
 	}
 	omap_set[p->first].push_back(p->second);
 	continue;
@@ -3823,21 +3819,22 @@ int FileStore::_setattrs(coll_t cid, const hobject_t& oid, map<string,bufferptr>
     int r = get_index(cid, &index);
     if (r < 0) {
       dout(10) << __func__ << " could not get index r = " << r << dendl;
-      return r;
+      goto out_close;
     }
     r = object_map->remove_xattrs(oid, omap_remove, &spos);
     if (r < 0 && r != -ENOENT) {
       dout(10) << __func__ << " could not remove_xattrs r = " << r << dendl;
       assert(!m_filestore_fail_eio || r != -EIO);
-      return r;
+      goto out_close;
     }
     r = object_map->set_xattrs(oid, omap_set, &spos);
     if (r < 0) {
       dout(10) << __func__ << " could not set_xattrs r = " << r << dendl;
       assert(!m_filestore_fail_eio || r != -EIO);
-      return r;
+      goto out_close;
     }
   }
+ out_close:
   lfn_close(fd);
  out:
   dout(10) << "setattrs " << cid << "/" << oid << " = " << r << dendl;
@@ -3863,7 +3860,7 @@ int FileStore::_rmattr(coll_t cid, const hobject_t& oid, const char *name,
     r = get_index(cid, &index);
     if (r < 0) {
       dout(10) << __func__ << " could not get index r = " << r << dendl;
-      return r;
+      goto out_close;
     }
     set<string> to_remove;
     to_remove.insert(string(name));
@@ -3871,9 +3868,10 @@ int FileStore::_rmattr(coll_t cid, const hobject_t& oid, const char *name,
     if (r < 0 && r != -ENOENT) {
       dout(10) << __func__ << " could not remove_xattrs index r = " << r << dendl;
       assert(!m_filestore_fail_eio || r != -EIO);
-      return r;
+      goto out_close;
     }
   }
+ out_close:
   lfn_close(fd);
  out:
   dout(10) << "rmattr " << cid << "/" << oid << " '" << name << "' = " << r << dendl;

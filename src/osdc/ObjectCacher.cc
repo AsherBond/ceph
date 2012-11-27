@@ -734,7 +734,9 @@ void ObjectCacher::bh_write(BufferHead *bh)
 {
   assert(lock.is_locked());
   ldout(cct, 7) << "bh_write " << *bh << dendl;
-  
+
+  bh->ob->get();
+
   // finishers
   C_WriteCommit *oncommit = new C_WriteCommit(this, bh->ob->oloc.pool,
                                               bh->ob->get_soid(), bh->start(), bh->length());
@@ -842,6 +844,8 @@ void ObjectCacher::bh_write_commit(int64_t poolid, sobject_t oid, loff_t start,
 
     // is the entire object set now clean and fully committed?
     ObjectSet *oset = ob->oset;
+    ob->put();
+
     if (flush_set_callback &&
 	was_dirty_or_tx > 0 &&
 	oset->dirty_or_tx == 0) {        // nothing dirty/tx
@@ -973,6 +977,7 @@ int ObjectCacher::_readx(OSDRead *rd, ObjectSet *oset, Context *onfinish,
     // get Object cache
     sobject_t soid(ex_it->oid, rd->snap);
     Object *o = get_object(soid, oset, ex_it->oloc);
+    touch_ob(o);
 
     // does not exist and no hits?
     if (oset->return_enoent && !o->exists) {

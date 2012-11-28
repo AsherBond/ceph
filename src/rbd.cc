@@ -82,9 +82,11 @@ void usage()
 "  resize --size <MB> <image-name>             resize (expand or contract) image\n"
 "  rm <image-name>                             delete an image\n"
 "  export <image-name> <path>                  export image to file\n"
+"                                              \"-\" for stdout\n"
 "  import <path> <image-name>                  import image from file\n"
-"                                              (dest defaults)\n"
-"                                              as the filename part of file)\n"
+"                                              (dest defaults\n"
+"                                               as the filename part of file)\n"
+"                                              \"-\" for stdin\n"
 "  (cp | copy) <src> <dest>                    copy src image to dest\n"
 "  (mv | rename) <src> <dest>                  rename src image to dest\n"
 "  snap ls <image-name>                        dump list of image snapshots\n"
@@ -671,14 +673,45 @@ static int export_read_cb(uint64_t ofs, size_t len, const char *buf, void *arg)
   ssize_t ret;
   ExportContext *ec = (ExportContext *)arg;
   int fd = ec->fd;
+  static char *localbuf = NULL;
+  static size_t maplen = 0;
 
-  if (!buf) /* a hole */
-    return 0;
+  if (fd == 1) {
+    if (!buf) {
+      // can't seek stdout; need actual data to write
+      if (maplen < len) {
+	// never mapped, or need to map larger
+	int r;
+	if (localbuf != NULL){
+	  if ((r = munmap(localbuf, len)) < 0) {
+	    cerr << "rbd: error " << r << "munmap'ing buffer" << std::endl;
+	    return errno;
+	  }
+	}
 
-  ret = lseek64(fd, ofs, SEEK_SET);
-  if (ret < 0)
-    return -errno;
-  ret = write(fd, buf, len);
+	maplen = len;
+	localbuf = (char *)mmap(NULL, maplen, PROT_READ,
+			        MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+	if (localbuf == MAP_FAILED) {
+	  cerr << "rbd: MAP_FAILED mmap'ing buffer for zero writes"
+	       << std::endl;
+	  return -ENOMEM;
+	}
+      }
+      ret = write(fd, localbuf, len);
+    } else {
+      ret = write(fd, buf, len);
+    }
+  } else {		// not stdout
+    if (!buf) /* a hole */
+      return 0;
+
+    ret = lseek64(fd, ofs, SEEK_SET);
+    if (ret < 0)
+      return -errno;
+    ret = write(fd, buf, len);
+  }
+
   if (ret < 0)
     return -errno;
 
@@ -696,7 +729,10 @@ static int do_export(librbd::Image& image, const char *path)
   if (r < 0)
     return r;
 
-  fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+  if (strcmp(path, "-") == 0)
+    fd = 1;
+  else
+    fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
   if (fd < 0)
     return -errno;
 
@@ -705,7 +741,8 @@ static int do_export(librbd::Image& image, const char *path)
   if (r < 0)
     goto out;
 
-  r = ftruncate(fd, info.size);
+  if (fd != 1)
+    r = ftruncate(fd, info.size);
   if (r < 0)
     goto out;
 
@@ -774,6 +811,58 @@ done_img:
   update_snap_name(*new_img, snap);
 }
 
+static int do_import_from_stdin(librbd::RBD &rbd, librados::IoCtx& io_ctx,
+		                const char *imgname, int *order, int format,
+				int64_t features, int64_t size)
+{
+  int r;
+  // start with inherent block size; double as needed; fix when done
+  size_t cur_size = 1 << *order;
+
+  r = do_create(rbd, io_ctx, imgname, cur_size, order, format, features, 0, 0);
+  if (r < 0) {
+    cerr << "rbd: image creation failed" << std::endl;
+    return r;
+  }
+  librbd::Image image;
+  r = rbd.open(io_ctx, image, imgname);
+  if (r < 0) {
+    cerr << "rbd: failed to open image" << std::endl;
+    return r;
+  }
+
+  size_t readlen;
+  off_t file_pos = 0;
+
+  size_t len = 1 << *order;
+  bufferptr p(len);
+
+  while ((readlen = ::read(0, p.c_str(), len)) > 0) {
+    bufferlist bl;
+    bl.append(p);
+    if ((file_pos + readlen) > cur_size) {
+      cur_size *= 2;
+      r = image.resize(cur_size);
+      if (r < 0) {
+	cerr << "rbd: can't resize image during import" << std::endl;
+	return r;
+      }
+    }
+    r = image.write(file_pos, readlen, bl);
+    if (r < 0) {
+      cerr << "rbd: error writing to image block" << std::endl;
+      return r;
+    }
+    file_pos += readlen;
+  }
+  r = image.resize(file_pos);
+  if (r < 0) {
+    cerr << "rbd: final image resize failed" << std::endl;
+    return r;
+  }
+  return readlen;	// 0 or error
+}
+
 static int do_import(librbd::RBD &rbd, librados::IoCtx& io_ctx,
 		     const char *imgname, int *order, const char *path,
 		     int format, uint64_t features, int64_t size)
@@ -783,11 +872,16 @@ static int do_import(librbd::RBD &rbd, librados::IoCtx& io_ctx,
   struct fiemap *fiemap;
   MyProgressContext pc("Importing image");
 
-  if (! strcmp(path, "-")) {
-    fd = 0;
-  } else {
-    fd = open(path, O_RDONLY);
-  }
+  assert(imgname);
+
+  // default order as usual
+  if (*order == 0)
+    *order = 22;
+
+  if (!strcmp(path, "-"))
+    return do_import_from_stdin(rbd, io_ctx, imgname, order, format,
+				features, size);
+  fd = open(path, O_RDONLY);
 
   if (fd < 0) {
     r = -errno;
@@ -815,8 +909,6 @@ static int do_import(librbd::RBD &rbd, librados::IoCtx& io_ctx,
     }
   }
 
-  assert(imgname);
-
   r = do_create(rbd, io_ctx, imgname, size, order, format, features, 0, 0);
   if (r < 0) {
     cerr << "rbd: image creation failed" << std::endl;
@@ -830,6 +922,7 @@ static int do_import(librbd::RBD &rbd, librados::IoCtx& io_ctx,
     close(fd);
     return r;
   }
+
   fsync(fd); /* flush it first, otherwise extents information might not have been flushed yet */
   fiemap = read_fiemap(fd);
   if (fiemap && !fiemap->fm_mapped_extents) {
@@ -860,6 +953,7 @@ static int do_import(librbd::RBD &rbd, librados::IoCtx& io_ctx,
   while (extent < fiemap->fm_mapped_extents) {
     off_t file_pos, end_ofs;
     size_t extent_len = 0;
+    size_t read_len = 1ULL << *order;
 
     file_pos = fiemap->fm_extents[extent].fe_logical; /* position within the file we're reading */
 
@@ -878,11 +972,10 @@ static int do_import(librbd::RBD &rbd, librados::IoCtx& io_ctx,
 
     } while (end_ofs == (off_t)fiemap->fm_extents[extent].fe_logical);
 
-#define READ_BLOCK_LEN (4 * 1024 * 1024)
     uint64_t left = end_ofs - file_pos;
     while (left) {
       pc.update_progress(file_pos, size);
-      uint64_t cur_seg = (left < READ_BLOCK_LEN ? left : READ_BLOCK_LEN);
+      uint64_t cur_seg = (left < read_len ? left : read_len);
       while (cur_seg) {
         bufferptr p(cur_seg);
 	ssize_t rval;
@@ -908,7 +1001,7 @@ static int do_import(librbd::RBD &rbd, librados::IoCtx& io_ctx,
           r = -ENOMEM;
           goto done;
         }
-        r = image.aio_write(file_pos, len, bl, completion);
+	r = image.aio_write(file_pos, len, bl, completion);
         if (r < 0)
           goto done;
 	completion->wait_for_complete();

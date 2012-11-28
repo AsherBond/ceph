@@ -12,11 +12,20 @@ rbd rm testimg || true
 
 rbd import $RBD_CREATE_ARGS /tmp/img testimg
 rbd export testimg /tmp/img2
-
+rbd export testimg - > /tmp/img3
 rbd rm testimg
-
 cmp /tmp/img /tmp/img2
+cmp /tmp/img /tmp/img3
+rm /tmp/img2 /tmp/img3
 
-rm /tmp/img /tmp/img2
+# try again, importing from stdin
+rbd import $RBD_CREATE_ARGS - testimg < /tmp/img
+rbd export testimg /tmp/img2
+rbd export testimg - > /tmp/img3
+rbd rm testimg
+cmp /tmp/img /tmp/img2
+cmp /tmp/img /tmp/img3
+
+rm /tmp/img /tmp/img2 /tmp/img3
 
 echo OK

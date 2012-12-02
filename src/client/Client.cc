@@ -1692,14 +1692,14 @@ bool Client::ms_dispatch(Message *m)
   if (unmounting) {
     ldout(cct, 10) << "unmounting: trim pass, size was " << lru.lru_get_size() 
              << "+" << inode_map.size() << dendl;
+    long unsigned size = lru.lru_get_size() + inode_map.size();
     trim_cache();
-    if (lru.lru_get_size() == 0 && inode_map.empty()) {
-      ldout(cct, 10) << "unmounting: trim pass, cache now empty, waking unmount()" << dendl;
+    if (size < lru.lru_get_size() + inode_map.size()) {
+      ldout(cct, 10) << "unmounting: trim pass, cache shrank, poking unmount()" << dendl;
       mount_cond.Signal();
     } else {
       ldout(cct, 10) << "unmounting: trim pass, size still " << lru.lru_get_size() 
                << "+" << inode_map.size() << dendl;
-      dump_cache(NULL);      
     }
   }
 
@@ -3591,8 +3591,11 @@ void Client::unmount()
             << "+" << inode_map.size() << " items" 
 	    << ", waiting (for caps to release?)"
             << dendl;
-    dump_cache(NULL);
-    mount_cond.Wait(client_lock);
+    utime_t until = ceph_clock_now(cct) + utime_t(5, 0);
+    int r = mount_cond.WaitUntil(client_lock, until);
+    if (r == ETIMEDOUT) {
+      dump_cache(NULL);
+    }
   }
   assert(lru.lru_get_size() == 0);
   assert(inode_map.empty());
@@ -5400,6 +5403,7 @@ int Client::read(int fd, char *buf, loff_t size, loff_t offset)
 
 int Client::_read(Fh *f, int64_t offset, uint64_t size, bufferlist *bl)
 {
+  const md_config_t *conf = cct->_conf;
   Inode *in = f->inode;
 
   //bool lazy = f->mode == CEPH_FILE_MODE_LAZY;
@@ -5416,7 +5420,7 @@ int Client::_read(Fh *f, int64_t offset, uint64_t size, bufferlist *bl)
     movepos = true;
   }
 
-  if (have & CEPH_CAP_FILE_CACHE)
+  if (!conf->client_debug_force_sync_read && have & CEPH_CAP_FILE_CACHE)
     r = _read_async(f, offset, size, bl);
   else
     r = _read_sync(f, offset, size, bl);
@@ -5564,6 +5568,9 @@ int Client::_read_sync(Fh *f, uint64_t off, uint64_t len, bufferlist *bl)
     flock.Unlock();
     client_lock.Lock();
 
+    // if we get ENOENT from OSD, assume 0 bytes returned
+    if (r == -ENOENT)
+      r = 0;
     if (r < 0)
       return r;
     if (tbl.length()) {

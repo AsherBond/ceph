@@ -34,6 +34,7 @@
 #include "Watch.h"
 
 #include "common/ceph_argparse.h"
+#include "common/version.h"
 #include "os/FileStore.h"
 #include "os/FileJournal.h"
 
@@ -2872,7 +2873,12 @@ void OSD::do_command(Connection *con, tid_t tid, vector<string>& cmd, bufferlist
 
   dout(20) << "do_command tid " << tid << " " << cmd << dendl;
 
-  if (cmd[0] == "injectargs") {
+  if (cmd[0] == "version") {
+    ss << pretty_version_to_str();
+    r = 0;
+    goto out;
+  }
+  else if (cmd[0] == "injectargs") {
     if (cmd.size() < 2) {
       r = -EINVAL;
       ss << "ignoring empty injectargs";
@@ -5823,6 +5829,9 @@ void OSD::handle_op(OpRequestRef op)
     if (g_conf->osd_max_write_size &&
 	m->get_data_len() > g_conf->osd_max_write_size << 20) {
       // journal can't hold commit!
+      derr << "handle_op msg data len " << m->get_data_len()
+	   << " > osd_max_write_size " << (g_conf->osd_max_write_size << 20)
+	   << " on " << *m << dendl;
       service.reply_op_error(op, -OSD_WRITETOOBIG);
       return;
     }

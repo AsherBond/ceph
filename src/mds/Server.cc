@@ -2590,6 +2590,29 @@ void Server::handle_client_openc(MDRequest *mdr)
     return;
   }
 
+  if (!(req->head.args.open.flags & O_EXCL)) {
+    int r = mdcache->path_traverse(mdr, NULL, NULL, req->get_filepath(),
+				   &mdr->dn[0], NULL, MDS_TRAVERSE_FORWARD);
+    if (r > 0) return;
+    if (r == 0) {
+      // it existed.
+      handle_client_open(mdr);
+      return;
+    }
+    if (r < 0 && r != -ENOENT) {
+      if (r == -ESTALE) {
+	dout(10) << "FAIL on ESTALE but attempting recovery" << dendl;
+	Context *c = new C_MDS_TryFindInode(this, mdr);
+	mdcache->find_ino_peers(req->get_filepath().get_ino(), c);
+      } else {
+	dout(10) << "FAIL on error " << r << dendl;
+	reply_request(mdr, r);
+      }
+      return;
+    }
+    // r == -ENOENT
+  }
+
   bool excl = (req->head.args.open.flags & O_EXCL);
   set<SimpleLock*> rdlocks, wrlocks, xlocks;
   ceph_file_layout *dir_layout = NULL;
@@ -2615,8 +2638,15 @@ void Server::handle_client_openc(MDRequest *mdr)
   if (req->head.args.open.object_size)
     layout.fl_object_size = req->head.args.open.object_size;
   if (req->get_connection()->has_feature(CEPH_FEATURE_CREATEPOOLID) &&
-      (__s32)req->head.args.open.pool >= 0)
+      (__s32)req->head.args.open.pool >= 0) {
     layout.fl_pg_pool = req->head.args.open.pool;
+
+    // make sure we have as new a map as the client
+    if (req->get_mdsmap_epoch() > mds->mdsmap->get_epoch()) {
+      mds->wait_for_mdsmap(req->get_mdsmap_epoch(), new C_MDS_RetryRequest(mdcache, mdr));
+      return;
+    }
+  }
 
   if (!ceph_file_layout_is_valid(&layout)) {
     dout(10) << " invalid initial file layout" << dendl;
@@ -2638,13 +2668,9 @@ void Server::handle_client_openc(MDRequest *mdr)
 
   if (!dnl->is_null()) {
     // it existed.  
-    if (req->head.args.open.flags & O_EXCL) {
-      dout(10) << "O_EXCL, target exists, failing with -EEXIST" << dendl;
-      reply_request(mdr, -EEXIST, dnl->get_inode(), dn);
-      return;
-    } 
-    
-    handle_client_open(mdr);
+    assert(req->head.args.open.flags & O_EXCL);
+    dout(10) << "O_EXCL, target exists, failing with -EEXIST" << dendl;
+    reply_request(mdr, -EEXIST, dnl->get_inode(), dn);
     return;
   }
 
@@ -2741,9 +2767,14 @@ void Server::handle_client_readdir(MDRequest *mdr)
   assert(dir->is_auth());
 
   if (!dir->is_complete()) {
+    if (dir->is_frozen()) {
+      dout(7) << "dir is frozen " << *dir << dendl;
+      dir->add_waiter(CDir::WAIT_UNFREEZE, new C_MDS_RetryRequest(mdcache, mdr));
+      return;
+    }
     // fetch
     dout(10) << " incomplete dir contents for readdir on " << *dir << ", fetching" << dendl;
-    dir->fetch(new C_MDS_RetryRequest(mdcache, mdr));
+    dir->fetch(new C_MDS_RetryRequest(mdcache, mdr), true);
     return;
   }
 
@@ -2833,14 +2864,22 @@ void Server::handle_client_readdir(MDRequest *mdr)
 	dout(10) << "skipping bad remote ino on " << *dn << dendl;
 	continue;
       } else {
-	mdcache->open_remote_dentry(dn, dnp, new C_MDS_RetryRequest(mdcache, mdr));
-
 	// touch everything i _do_ have
 	for (it = dir->begin(); 
 	     it != dir->end(); 
 	     it++) 
 	  if (!it->second->get_linkage()->is_null())
 	    mdcache->lru.lru_touch(it->second);
+
+	// already issued caps and leases, reply immediately.
+	if (dnbl.length() > 0) {
+	  mdcache->open_remote_dentry(dn, dnp, new C_NoopContext);
+	  dout(10) << " open remote dentry after caps were issued, stopping at "
+		   << dnbl.length() << " < " << bytes_left << dendl;
+	  break;
+	}
+
+	mdcache->open_remote_dentry(dn, dnp, new C_MDS_RetryRequest(mdcache, mdr));
 	return;
       }
     }
@@ -3286,8 +3325,15 @@ void Server::handle_client_setlayout(MDRequest *mdr)
     layout.fl_cas_hash = req->head.args.setlayout.layout.fl_cas_hash;
   if (req->head.args.setlayout.layout.fl_object_stripe_unit > 0)
     layout.fl_object_stripe_unit = req->head.args.setlayout.layout.fl_object_stripe_unit;
-  if (req->head.args.setlayout.layout.fl_pg_pool > 0)
+  if (req->head.args.setlayout.layout.fl_pg_pool > 0) {
     layout.fl_pg_pool = req->head.args.setlayout.layout.fl_pg_pool;
+
+    // make sure we have as new a map as the client
+    if (req->get_mdsmap_epoch() > mds->mdsmap->get_epoch()) {
+      mds->wait_for_mdsmap(req->get_mdsmap_epoch(), new C_MDS_RetryRequest(mdcache, mdr));
+      return;
+    }
+  }
   if (!ceph_file_layout_is_valid(&layout)) {
     dout(10) << "bad layout" << dendl;
     reply_request(mdr, -EINVAL);
@@ -3361,8 +3407,16 @@ void Server::handle_client_setdirlayout(MDRequest *mdr)
     layout->layout.fl_cas_hash = req->head.args.setlayout.layout.fl_cas_hash;
   if (req->head.args.setlayout.layout.fl_object_stripe_unit > 0)
     layout->layout.fl_object_stripe_unit = req->head.args.setlayout.layout.fl_object_stripe_unit;
-  if (req->head.args.setlayout.layout.fl_pg_pool > 0)
+  if (req->head.args.setlayout.layout.fl_pg_pool > 0) {
     layout->layout.fl_pg_pool = req->head.args.setlayout.layout.fl_pg_pool;
+
+    // make sure we have as new a map as the client
+    if (req->get_mdsmap_epoch() > mds->mdsmap->get_epoch()) {
+      delete layout;
+      mds->wait_for_mdsmap(req->get_mdsmap_epoch(), new C_MDS_RetryRequest(mdcache, mdr));
+      return;
+    }
+  }
   if (!ceph_file_layout_is_valid(&layout->layout)) {
     dout(10) << "bad layout" << dendl;
     reply_request(mdr, -EINVAL);
@@ -5428,6 +5482,8 @@ void Server::handle_client_rename(MDRequest *mdr)
   }
   
   _rename_prepare(mdr, &le->metablob, &le->client_map, srcdn, destdn, straydn);
+  if (le->client_map.length())
+    le->cmapv = mds->sessionmap.projected;
 
   // -- commit locally --
   C_MDS_rename_finish *fin = new C_MDS_rename_finish(mds, mdr, srcdn, destdn, straydn);

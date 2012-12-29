@@ -61,10 +61,10 @@ static dev_t new_decode_dev(uint32_t dev)
 class CephFuse::Handle {
 public:
   Handle(Client *c, int fd);
-  ~Handle();
 
   int init(int argc, const char *argv[]);
   int loop();
+  void finalize();
 
   uint64_t fino_snap(uint64_t fino);
   vinodeno_t fino_vino(inodeno_t fino);
@@ -584,7 +584,7 @@ CephFuse::Handle::Handle(Client *c, int fd) :
   stag_snap_map[0] = CEPH_NOSNAP;
 }
 
-CephFuse::Handle::~Handle()
+void CephFuse::Handle::finalize()
 {
   client->ll_register_ino_invalidate_cb(NULL, NULL);
 
@@ -596,6 +596,7 @@ CephFuse::Handle::~Handle()
     fuse_session_destroy(se);
   if (ch)
     fuse_unmount(mountpoint, ch);
+
 }
 
 int CephFuse::Handle::init(int argc, const char *argv[])
@@ -646,7 +647,7 @@ int CephFuse::Handle::init(int argc, const char *argv[])
     goto done;
   }
 
-  se = fuse_lowlevel_new(&args, &ceph_ll_oper, sizeof(ceph_ll_oper), NULL);
+  se = fuse_lowlevel_new(&args, &ceph_ll_oper, sizeof(ceph_ll_oper), this);
   if (!se) {
     derr << "fuse_lowlevel_new failed" << dendl;
     ret = EDOM;
@@ -730,4 +731,9 @@ int CephFuse::init(int argc, const char *argv[])
 int CephFuse::loop()
 {
   return _handle->loop();
+}
+
+void CephFuse::finalize()
+{
+  return _handle->finalize();
 }

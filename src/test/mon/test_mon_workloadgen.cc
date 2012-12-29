@@ -413,6 +413,7 @@ class OSDStub : public TestStub
       monc.shutdown();
       return err;
     }
+    assert(!monc.get_fsid().is_zero());
 
     monc.wait_auth_rotating(30.0);
 
@@ -763,6 +764,15 @@ class OSDStub : public TestStub
 
   void handle_osd_map(MOSDMap *m) {
     dout(1) << __func__ << dendl;
+    if (m->fsid != monc.get_fsid()) {
+      dout(0) << __func__
+              << " message fsid " << m->fsid << " != " << monc.get_fsid()
+              << dendl;
+      dout(0) << __func__ << " " << m
+              << " from " << m->get_source_inst()
+              << dendl;
+      dout(0) << monc.get_monmap() << dendl;
+    }
     assert(m->fsid == monc.get_fsid());
 
     epoch_t first = m->get_first();

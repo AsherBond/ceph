@@ -2874,9 +2874,12 @@ void OSD::do_command(Connection *con, tid_t tid, vector<string>& cmd, bufferlist
 
   dout(20) << "do_command tid " << tid << " " << cmd << dendl;
 
-  if (cmd[0] == "version") {
+  if (cmd.size() == 0) {
+    ss << "no command given";
+    goto out;
+  }
+  else if (cmd[0] == "version") {
     ss << pretty_version_to_str();
-    r = 0;
     goto out;
   }
   else if (cmd[0] == "injectargs") {
@@ -3827,7 +3830,10 @@ void OSD::handle_osd_map(MOSDMap *m)
 
   if (superblock.oldest_map) {
     int num = 0;
-    for (epoch_t e = superblock.oldest_map; e < m->oldest_map; ++e) {
+    epoch_t min(
+      MIN(m->oldest_map,
+	  service.map_cache.cached_key_lower_bound()));
+    for (epoch_t e = superblock.oldest_map; e < min; ++e) {
       dout(20) << " removing old osdmap epoch " << e << dendl;
       t.remove(coll_t::META_COLL, get_osdmap_pobject_name(e));
       t.remove(coll_t::META_COLL, get_inc_osdmap_pobject_name(e));

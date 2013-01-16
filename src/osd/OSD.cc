@@ -1362,8 +1362,7 @@ void OSD::add_newly_split_pg(PG *pg, PG::RecoveryCtx *rctx)
   pg->get_osdmap()->pg_to_up_acting_osds(pg->info.pgid, up, acting);
   int role = pg->get_osdmap()->calc_pg_role(service.whoami, acting);
   pg->set_role(role);
-  service.reg_last_pg_scrub(pg->info.pgid,
-			    pg->info.history.last_scrub_stamp);
+  pg->reg_next_scrub();
   pg->handle_loaded(rctx);
   pg->write_if_dirty(*(rctx->transaction));
   pg->queue_null(e, e);
@@ -1529,7 +1528,7 @@ void OSD::load_pgs()
       service.start_split(split_pgs);
     }
 
-    service.reg_last_pg_scrub(pg->info.pgid, pg->info.history.last_scrub_stamp);
+    pg->reg_next_scrub();
 
     // generate state for current mapping
     osdmap->pg_to_up_acting_osds(pgid, pg->up, pg->acting);
@@ -2226,8 +2225,8 @@ void OSD::tick()
   if (is_active()) {
     // periodically kick recovery work queue
     recovery_tp.wake();
-  
-    if (service.scrub_should_schedule()) {
+
+    if (!scrub_random_backoff()) {
       sched_scrub();
     }
 
@@ -3498,13 +3497,12 @@ void OSD::handle_scrub(MOSDScrub *m)
       PG *pg = p->second;
       pg->lock();
       if (pg->is_primary()) {
-	if (m->repair)
-	  pg->state_set(PG_STATE_REPAIR);
-	if (m->deep)
-	  pg->state_set(PG_STATE_DEEP_SCRUB);
-	if (pg->queue_scrub()) {
-	  dout(10) << "queueing " << *pg << " for scrub" << dendl;
-	}
+	pg->unreg_next_scrub();
+	pg->scrubber.must_scrub = true;
+	pg->scrubber.must_deep_scrub = m->deep;
+	pg->scrubber.must_repair = m->repair;
+	pg->reg_next_scrub();
+	dout(10) << "marking " << *pg << " for scrub" << dendl;
       }
       pg->unlock();
     }
@@ -3516,13 +3514,12 @@ void OSD::handle_scrub(MOSDScrub *m)
 	PG *pg = pg_map[*p];
 	pg->lock();
 	if (pg->is_primary()) {
-	  if (m->repair)
-	    pg->state_set(PG_STATE_REPAIR);
-	  if (m->deep || m->repair)
-	    pg->state_set(PG_STATE_DEEP_SCRUB);
-	  if (pg->queue_scrub()) {
-	    dout(10) << "queueing " << *pg << " for scrub" << dendl;
-	  }
+	  pg->unreg_next_scrub();
+	  pg->scrubber.must_scrub = true;
+	  pg->scrubber.must_deep_scrub = m->deep;
+	  pg->scrubber.must_repair = m->repair;
+	  pg->reg_next_scrub();
+	  dout(10) << "marking " << *pg << " for scrub" << dendl;
 	}
 	pg->unlock();
       }
@@ -3531,16 +3528,19 @@ void OSD::handle_scrub(MOSDScrub *m)
   m->put();
 }
 
-bool OSDService::scrub_should_schedule()
+bool OSD::scrub_random_backoff()
+{
+  bool coin_flip = (rand() % 3) == whoami % 3;
+  if (!coin_flip) {
+    dout(20) << "scrub_random_backoff lost coin flip, randomly backing off" << dendl;
+    return true;
+  }
+  return false;
+}
+
+bool OSD::scrub_should_schedule()
 {
   double loadavgs[1];
-
-  // TODOSAM: is_active should be conveyed to OSDService
-  /*
-  if (!is_active())
-    return false;
-  */
-
   if (getloadavg(loadavgs, 1) != 1) {
     dout(10) << "scrub_should_schedule couldn't read loadavgs\n" << dendl;
     return false;
@@ -3553,15 +3553,6 @@ bool OSDService::scrub_should_schedule()
     return false;
   }
 
-  bool coin_flip = (rand() % 3) == whoami % 3;
-  if (!coin_flip) {
-    dout(20) << "scrub_should_schedule loadavg " << loadavgs[0]
-	     << " < max " << g_conf->osd_scrub_load_threshold
-	     << " = no, randomly backing off"
-	     << dendl;
-    return false;
-  }
-  
   dout(20) << "scrub_should_schedule loadavg " << loadavgs[0]
 	   << " < max " << g_conf->osd_scrub_load_threshold
 	   << " = yes" << dendl;
@@ -3572,33 +3563,52 @@ void OSD::sched_scrub()
 {
   assert(osd_lock.is_locked());
 
-  dout(20) << "sched_scrub" << dendl;
+  bool load_is_low = scrub_should_schedule();
+
+  dout(20) << "sched_scrub load_is_low=" << (int)load_is_low << dendl;
 
   utime_t max = ceph_clock_now(g_ceph_context);
+  utime_t min = max;
+  min -= g_conf->osd_scrub_min_interval;
   max -= g_conf->osd_scrub_max_interval;
   
   //dout(20) << " " << last_scrub_pg << dendl;
 
   pair<utime_t, pg_t> pos;
-  while (service.next_scrub_stamp(pos, &pos)) {
-    utime_t t = pos.first;
-    pg_t pgid = pos.second;
+  if (service.first_scrub_stamp(&pos)) {
+    do {
+      utime_t t = pos.first;
+      pg_t pgid = pos.second;
+      dout(30) << " " << pgid << " at " << t << dendl;
 
-    if (t > max) {
-      dout(10) << " " << pgid << " at " << t
-	       << " > " << max << " (" << g_conf->osd_scrub_max_interval << " seconds ago)" << dendl;
-      break;
-    }
-
-    dout(10) << " on " << t << " " << pgid << dendl;
-    PG *pg = _lookup_lock_pg(pgid);
-    if (pg) {
-      if (pg->is_active() && pg->sched_scrub()) {
-	pg->unlock();
+      if (t > min) {
+	dout(10) << " " << pgid << " at " << t
+		 << " > min " << min << " (" << g_conf->osd_scrub_min_interval << " seconds ago)" << dendl;
 	break;
       }
-      pg->unlock();
-    }
+      if (t > max && !load_is_low) {
+	// save ourselves some effort
+	break;
+      }
+
+      PG *pg = _lookup_lock_pg(pgid);
+      if (pg) {
+	if (pg->is_active() &&
+	    (load_is_low ||
+	     t < max ||
+	     pg->scrubber.must_scrub)) {
+	  dout(10) << " " << pgid << " at " << t
+		   << (pg->scrubber.must_scrub ? ", explicitly requested" : "")
+		   << (t < max ? ", last_scrub < max" : "")
+		   << dendl;
+	  if (pg->sched_scrub()) {
+	    pg->unlock();
+	    break;
+	  }
+	}
+	pg->unlock();
+      }
+    } while  (service.next_scrub_stamp(pos, &pos));
   }    
   dout(20) << "sched_scrub done" << dendl;
 }
@@ -5585,11 +5595,11 @@ void OSD::_remove_pg(PG *pg)
 
   pg->deleting = true;
 
+  pg->unreg_next_scrub();
+
   // remove from map
   pg_map.erase(pg->info.pgid);
   pg->put(); // since we've taken it out of map
-
-  service.unreg_last_pg_scrub(pg->info.pgid, pg->info.history.last_scrub_stamp);
 }
 
 
@@ -5909,16 +5919,22 @@ void OSD::handle_op(OpRequestRef op)
     }
     OSDMapRef send_map = get_map(m->get_map_epoch());
 
-    // remap pgid
-    pgid = m->get_pg();
-    if ((m->get_flags() & CEPH_OSD_FLAG_PGOP) == 0 &&
-	send_map->have_pg_pool(pgid.pool()))
-      pgid = send_map->raw_pg_to_pg(pgid);
-    
-    if (send_map->get_pg_acting_role(m->get_pg(), whoami) >= 0) {
+    if (send_map->get_pg_acting_role(pgid, whoami) >= 0) {
       dout(7) << "dropping request; client will resend when they get new map" << dendl;
+    } else if (!send_map->have_pg_pool(pgid.pool())) {
+      dout(7) << "dropping request; pool did not exist" << dendl;
+      clog.warn() << m->get_source_inst() << " invalid " << m->get_reqid()
+		  << " pg " << m->get_pg()
+		  << " to osd." << whoami
+		  << " in e" << osdmap->get_epoch()
+		  << ", client e" << m->get_map_epoch()
+		  << " when pool " << m->get_pg().pool() << " did not exist"
+		  << "\n";
     } else {
       dout(7) << "we are invalid target" << dendl;
+      pgid = m->get_pg();
+      if ((m->get_flags() & CEPH_OSD_FLAG_PGOP) == 0)
+	pgid = send_map->raw_pg_to_pg(pgid);
       clog.warn() << m->get_source_inst() << " misdirected " << m->get_reqid()
 		  << " pg " << m->get_pg()
 		  << " to osd." << whoami

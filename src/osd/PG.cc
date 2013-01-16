@@ -82,6 +82,7 @@ PG::PG(OSDService *o, OSDMapRef curmap,
   pg_stats_valid(false),
   osr(osd->osr_registry.lookup_or_create(p, (stringify(p)))),
   finish_sync_event(NULL),
+  scrub_after_recovery(false),
   active_pushes(0),
   recovery_state(this)
 {
@@ -298,10 +299,10 @@ bool PG::proc_replica_info(int from, const pg_info_t &oinfo)
   peer_info[from] = oinfo;
   might_have_unfound.insert(from);
   
-  osd->unreg_last_pg_scrub(info.pgid, info.history.last_scrub_stamp);
+  unreg_next_scrub();
   if (info.history.merge(oinfo.history))
     dirty_info = true;
-  osd->reg_last_pg_scrub(info.pgid, info.history.last_scrub_stamp);
+  reg_next_scrub();
   
   // stray?
   if (!is_acting(from)) {
@@ -1024,6 +1025,8 @@ void PG::clear_primary_state()
   log.reset_recovery_pointers();
 
   scrubber.reserved_peers.clear();
+  scrub_after_recovery = false;
+
   osd->recovery_wq.dequeue(this);
   osd->snap_trim_wq.dequeue(this);
 }
@@ -1805,7 +1808,16 @@ bool PG::queue_scrub()
   if (is_scrubbing()) {
     return false;
   }
+  scrubber.must_scrub = false;
   state_set(PG_STATE_SCRUBBING);
+  if (scrubber.must_deep_scrub) {
+    state_set(PG_STATE_DEEP_SCRUB);
+    scrubber.must_deep_scrub = false;
+  }
+  if (scrubber.must_repair) {
+    state_set(PG_STATE_REPAIR);
+    scrubber.must_repair = false;
+  }
   osd->queue_for_scrub(this);
   return true;
 }
@@ -1864,8 +1876,9 @@ void PG::_finish_recovery(Context *c)
 
     update_stats();
 
-    if (state_test(PG_STATE_INCONSISTENT)) {
+    if (scrub_after_recovery) {
       dout(10) << "_finish_recovery requeueing for scrub" << dendl;
+      scrub_after_recovery = false;
       queue_scrub();
     }
   } else {
@@ -2178,7 +2191,13 @@ void PG::update_stats()
     info.stats.last_scrub_stamp = info.history.last_scrub_stamp;
     info.stats.last_deep_scrub = info.history.last_deep_scrub;
     info.stats.last_deep_scrub_stamp = info.history.last_deep_scrub_stamp;
+    info.stats.last_clean_scrub_stamp = info.history.last_clean_scrub_stamp;
     info.stats.last_epoch_clean = info.history.last_epoch_clean;
+
+    if (info.stats.stats.sum.num_scrub_errors)
+      state_set(PG_STATE_INCONSISTENT);
+    else
+      state_clear(PG_STATE_INCONSISTENT);
 
     utime_t now = ceph_clock_now(g_ceph_context);
     info.stats.last_fresh = now;
@@ -2286,7 +2305,7 @@ void PG::init(int role, vector<int>& newup, vector<int>& newacting, pg_history_t
   info.stats.acting = acting;
   info.stats.mapping_epoch = info.history.same_interval_since;
 
-  osd->reg_last_pg_scrub(info.pgid, info.history.last_scrub_stamp);
+  reg_next_scrub();
 
   write_info(*t);
   write_log(*t);
@@ -3005,12 +3024,6 @@ bool PG::sched_scrub()
     return false;
   }
 
-  // just scrubbed?
-  if (info.history.last_scrub_stamp + g_conf->osd_scrub_min_interval > ceph_clock_now(g_ceph_context)) {
-    dout(20) << "sched_scrub: just scrubbed, skipping" << dendl;
-    return false;
-  }
-
   bool ret = true;
   if (!scrubber.reserved) {
     assert(scrubber.reserved_peers.empty());
@@ -3047,6 +3060,20 @@ bool PG::sched_scrub()
   return ret;
 }
 
+void PG::reg_next_scrub()
+{
+  if (scrubber.must_scrub) {
+    scrubber.scrub_reg_stamp = utime_t();
+  } else {
+    scrubber.scrub_reg_stamp = info.history.last_scrub_stamp;
+  }
+  osd->reg_last_pg_scrub(info.pgid, scrubber.scrub_reg_stamp);
+}
+
+void PG::unreg_next_scrub()
+{
+  osd->unreg_last_pg_scrub(info.pgid, scrubber.scrub_reg_stamp);
+}
 
 void PG::sub_op_scrub_map(OpRequestRef op)
 {
@@ -4184,9 +4211,9 @@ void PG::scrub_process_inconsistent() {
        << scrubber.inconsistent.size() << " inconsistent objects\n";
     dout(2) << ss.str() << dendl;
     osd->clog.error(ss);
-    state_set(PG_STATE_INCONSISTENT);
     if (repair) {
       state_clear(PG_STATE_CLEAN);
+      scrub_after_recovery = true;
       for (map<hobject_t, pair<ScrubMap::object, int> >::iterator i =
 	     scrubber.authoritative.begin();
 	   i != scrubber.authoritative.end();
@@ -4262,9 +4289,6 @@ void PG::scrub_finish() {
 
   scrub_process_inconsistent();
 
-  if (scrubber.errors == 0 || (repair && (scrubber.errors - scrubber.fixed) == 0))
-    state_clear(PG_STATE_INCONSISTENT);
-
   {
     stringstream oss;
     oss << info.pgid << " " << mode << " ";
@@ -4282,14 +4306,18 @@ void PG::scrub_finish() {
   }
 
   // finish up
-  osd->unreg_last_pg_scrub(info.pgid, info.history.last_scrub_stamp);
+  unreg_next_scrub();
+  utime_t now = ceph_clock_now(g_ceph_context);
   info.history.last_scrub = info.last_update;
-  info.history.last_scrub_stamp = ceph_clock_now(g_ceph_context);
+  info.history.last_scrub_stamp = now;
   if (scrubber.deep) {
     info.history.last_deep_scrub = info.last_update;
-    info.history.last_deep_scrub_stamp = ceph_clock_now(g_ceph_context);
+    info.history.last_deep_scrub_stamp = now;
   }
-  osd->reg_last_pg_scrub(info.pgid, info.history.last_scrub_stamp);
+  if (scrubber.errors == 0)
+    info.history.last_clean_scrub_stamp = now;
+  info.stats.stats.sum.num_scrub_errors = scrubber.errors;
+  reg_next_scrub();
 
   {
     ObjectStore::Transaction *t = new ObjectStore::Transaction;
@@ -4373,9 +4401,9 @@ void PG::share_pg_log()
 
 void PG::update_history_from_master(pg_history_t new_history)
 {
-  osd->unreg_last_pg_scrub(info.pgid, info.history.last_scrub_stamp);
+  unreg_next_scrub();
   info.history.merge(new_history);
-  osd->reg_last_pg_scrub(info.pgid, info.history.last_scrub_stamp);
+  reg_next_scrub();
 }
 
 void PG::fulfill_info(int from, const pg_query_t &query, 
@@ -4721,10 +4749,10 @@ void PG::proc_primary_info(ObjectStore::Transaction &t, const pg_info_t &oinfo)
 {
   assert(!is_primary());
 
-  osd->unreg_last_pg_scrub(info.pgid, info.history.last_scrub_stamp);
+  unreg_next_scrub();
   if (info.history.merge(oinfo.history))
     dirty_info = true;
-  osd->reg_last_pg_scrub(info.pgid, info.history.last_scrub_stamp);
+  reg_next_scrub();
 
   // Handle changes to purged_snaps ONLY IF we have caught up
   if (last_complete_ondisk.epoch >= info.history.last_epoch_started) {
@@ -4796,6 +4824,13 @@ ostream& operator<<(ostream& out, const PG& pg)
   out << " " << pg_state_string(pg.get_state());
   if (pg.should_send_notify())
     out << " NOTIFY";
+
+  if (pg.scrubber.must_repair)
+    out << " MUST_REPAIR";
+  if (pg.scrubber.must_deep_scrub)
+    out << " MUST_DEEP_SCRUB";
+  if (pg.scrubber.must_scrub)
+    out << " MUST_SCRUB";
 
   //out << " (" << pg.log.tail << "," << pg.log.head << "]";
   if (pg.missing.num_missing()) {
@@ -6205,11 +6240,9 @@ boost::statechart::result PG::RecoveryState::Stray::react(const MLogRec& logevt)
 
   if (msg->info.last_backfill == hobject_t()) {
     // restart backfill
-    pg->osd->unreg_last_pg_scrub(pg->info.pgid,
-				 pg->info.history.last_scrub_stamp);
+    pg->unreg_next_scrub();
     pg->info = msg->info;
-    pg->osd->reg_last_pg_scrub(pg->info.pgid,
-			       pg->info.history.last_scrub_stamp);
+    pg->reg_next_scrub();
     pg->dirty_info = true;
     pg->dirty_log = true;
     pg->log.claim_log(msg->log);

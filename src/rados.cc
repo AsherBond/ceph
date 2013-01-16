@@ -87,11 +87,11 @@ void usage(ostream& out)
 "   cleanup <prefix>                 clean up a previous benchmark operation\n"
 "   load-gen [options]               generate load on the cluster\n"
 "   listomapkeys <obj-name>          list the keys in the object map\n"
+"   listomapvals <obj-name>          list the keys and vals in the object map \n"
 "   getomapval <obj-name> <key>      show the value for the specified key\n"
 "                                    in the object's object map\n"
 "   setomapval <obj-name> <key> <val>\n"
-"   listomapvals <obj-name> <key> <val>\n"
-"   rmomapkey <obj-name> <key> <val>\n"
+"   rmomapkey <obj-name> <key>\n"
 "   getomapheader <obj-name>\n"
 "   setomapheader <obj-name> <val>\n"
 "\n"
@@ -1547,9 +1547,11 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
 
     string oid(nargs[1]);
     string key(nargs[2]);
+    set<string> keys;
+    keys.insert(key);
 
     map<string, bufferlist> values;
-    ret = io_ctx.omap_get_vals(oid, key, 1, &values);
+    ret = io_ctx.omap_get_vals_by_keys(oid, keys, &values);
     if (ret < 0) {
       cerr << "error getting omap value " << pool_name << "/" << oid << "/"
 	   << key << ": " << cpp_strerror(ret) << std::endl;

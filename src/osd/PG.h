@@ -814,6 +814,7 @@ public:
       epoch_start(0),
       block_writes(false), active(false), queue_snap_trim(false),
       waiting_on(0), errors(0), fixed(0), active_rep_scrub(0),
+      must_scrub(false), must_deep_scrub(false), must_repair(false),
       finalizing(false), is_chunky(false), state(INACTIVE),
       deep(false)
     {
@@ -835,6 +836,10 @@ public:
     ScrubMap primary_scrubmap;
     map<int,ScrubMap> received_maps;
     MOSDRepScrub *active_rep_scrub;
+    utime_t scrub_reg_stamp;  // stamp we registered for
+
+    // flags to indicate explicitly requested scrubs (by admin)
+    bool must_scrub, must_deep_scrub, must_repair;
 
     // Maps from objects with erros to missing/inconsistent peers
     map<hobject_t, set<int> > missing;
@@ -927,6 +932,10 @@ public:
       }
       received_maps.clear();
 
+      must_scrub = false;
+      must_deep_scrub = false;
+      must_repair = false;
+
       state = PG::Scrubber::INACTIVE;
       start = hobject_t();
       end = hobject_t();
@@ -941,6 +950,8 @@ public:
     }
 
   } scrubber;
+
+  bool scrub_after_recovery;
 
   int active_pushes;
 
@@ -980,6 +991,8 @@ public:
   void scrub_unreserve_replicas();
   bool scrub_all_replicas_reserved() const;
   bool sched_scrub();
+  void reg_next_scrub();
+  void unreg_next_scrub();
 
   void replica_scrub(class MOSDRepScrub *op);
   void sub_op_scrub_map(OpRequestRef op);
@@ -1022,7 +1035,7 @@ public:
     Formatter *f;
     QueryState(Formatter *f) : f(f) {}
     void print(std::ostream *out) const {
-      *out << "Query" << std::endl;
+      *out << "Query";
     }
   };
 
@@ -1033,9 +1046,7 @@ public:
     MInfoRec(int from, pg_info_t &info, epoch_t msg_epoch) :
       from(from), info(info), msg_epoch(msg_epoch) {}
     void print(std::ostream *out) const {
-      *out << "MInfoRec from " << from
-	   << " info: " << info
-	   << std::endl;
+      *out << "MInfoRec from " << from << " info: " << info;
     }
   };
 
@@ -1045,8 +1056,7 @@ public:
     MLogRec(int from, MOSDPGLog *msg) :
       from(from), msg(msg) {}
     void print(std::ostream *out) const {
-      *out << "MLogRec from " << from
-	   << std::endl;
+      *out << "MLogRec from " << from;
     }
   };
 
@@ -1056,9 +1066,7 @@ public:
     MNotifyRec(int from, pg_notify_t &notify) :
       from(from), notify(notify) {}
     void print(std::ostream *out) const {
-      *out << "MNotifyRec from " << from
-	   << " notify: " << notify
-	   << std::endl;
+      *out << "MNotifyRec from " << from << " notify: " << notify;
     }
   };
 
@@ -1071,8 +1079,7 @@ public:
     void print(std::ostream *out) const {
       *out << "MQuery from " << from
 	   << " query_epoch " << query_epoch
-	   << " query: " << query
-	   << std::endl;
+	   << " query: " << query;
     }
   };
 
@@ -1083,14 +1090,14 @@ public:
     AdvMap(OSDMapRef osdmap, OSDMapRef lastmap, vector<int>& newup, vector<int>& newacting):
       osdmap(osdmap), lastmap(lastmap), newup(newup), newacting(newacting) {}
     void print(std::ostream *out) const {
-      *out << "AdvMap" << std::endl;
+      *out << "AdvMap";
     }
   };
 
   struct ActMap : boost::statechart::event< ActMap > {
     ActMap() : boost::statechart::event< ActMap >() {}
     void print(std::ostream *out) const {
-      *out << "ActMap" << std::endl;
+      *out << "ActMap";
     }
   };
   struct Activate : boost::statechart::event< Activate > {
@@ -1098,13 +1105,13 @@ public:
     Activate(epoch_t q) : boost::statechart::event< Activate >(),
 			  query_epoch(q) {}
     void print(std::ostream *out) const {
-      *out << "Activate from " << query_epoch << std::endl;
+      *out << "Activate from " << query_epoch;
     }
   };
 #define TrivialEvent(T) struct T : boost::statechart::event< T > { \
     T() : boost::statechart::event< T >() {}			   \
     void print(std::ostream *out) const {			   \
-      *out << #T << std::endl;					   \
+      *out << #T;						   \
     }								   \
   };
   TrivialEvent(Initialize)

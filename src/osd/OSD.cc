@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <signal.h>
+#include <ctype.h>
 #include <boost/scoped_ptr.hpp>
 
 #if defined(DARWIN) || defined(__FreeBSD__)
@@ -761,6 +762,7 @@ OSD::OSD(int id, Messenger *internal_messenger, Messenger *external_messenger,
   whoami(id),
   dev_path(dev), journal_path(jdev),
   dispatch_running(false),
+  asok_hook(NULL),
   osd_compat(get_osd_compat_set()),
   state(STATE_INITIALIZING), boot_epoch(0), up_epoch(0), bind_epoch(0),
   op_tp(external_messenger->cct, "OSD::op_tp", g_conf->osd_op_threads, "osd_op_threads"),
@@ -776,8 +778,6 @@ OSD::OSD(int id, Messenger *internal_messenger, Messenger *external_messenger,
   heartbeat_dispatcher(this),
   stat_lock("OSD::stat_lock"),
   finished_lock("OSD::finished_lock"),
-  admin_ops_hook(NULL),
-  historic_ops_hook(NULL),
   op_wq(this, g_conf->osd_op_thread_timeout, &op_tp),
   peering_wq(this, g_conf->osd_op_thread_timeout, &op_tp, 200),
   map_lock("OSD::map_lock"),
@@ -841,32 +841,57 @@ int OSD::pre_init()
          << "currently in use. (Is ceph-osd already running?)" << dendl;
     return -EBUSY;
   }
+
+  g_conf->add_observer(this);
   return 0;
 }
 
-class HistoricOpsSocketHook : public AdminSocketHook {
+// asok
+
+class OSDSocketHook : public AdminSocketHook {
   OSD *osd;
 public:
-  HistoricOpsSocketHook(OSD *o) : osd(o) {}
+  OSDSocketHook(OSD *o) : osd(o) {}
   bool call(std::string command, std::string args, bufferlist& out) {
     stringstream ss;
-    osd->dump_historic_ops(ss);
+    bool r = osd->asok_command(command, args, ss);
     out.append(ss);
-    return true;
+    return r;
   }
 };
 
+bool OSD::asok_command(string command, string args, ostream& ss)
+{
+  if (command == "dump_ops_in_flight") {
+    op_tracker.dump_ops_in_flight(ss);
+  } else if (command == "dump_historic_ops") {
+    op_tracker.dump_historic_ops(ss);
+  } else if (command == "dump_op_pq_state") {
+    JSONFormatter f(true);
+    f.open_object_section("pq");
+    op_wq.dump(&f);
+    f.close_section();
+    f.flush(ss);
+  } else {
+    assert(0 == "broken asok registration");
+  }
+  return true;
+}
 
-class OpsFlightSocketHook : public AdminSocketHook {
-  OSD *osd;
+class TestOpsSocketHook : public AdminSocketHook {
+  OSDService *service;
+  ObjectStore *store;
 public:
-  OpsFlightSocketHook(OSD *o) : osd(o) {}
+  TestOpsSocketHook(OSDService *s, ObjectStore *st) : service(s), store(st) {}
   bool call(std::string command, std::string args, bufferlist& out) {
     stringstream ss;
-    osd->dump_ops_in_flight(ss);
+    test_ops(service, store, command, args, ss);
     out.append(ss);
     return true;
   }
+  void test_ops(OSDService *service, ObjectStore *store, std::string command,
+     std::string args, ostream &ss);
+
 };
 
 int OSD::init()
@@ -962,13 +987,29 @@ int OSD::init()
   // tick
   timer.add_event_after(g_conf->osd_heartbeat_interval, new C_Tick(this));
 
-  admin_ops_hook = new OpsFlightSocketHook(this);
   AdminSocket *admin_socket = cct->get_admin_socket();
-  r = admin_socket->register_command("dump_ops_in_flight", admin_ops_hook,
-                                         "show the ops currently in flight");
-  historic_ops_hook = new HistoricOpsSocketHook(this);
-  r = admin_socket->register_command("dump_historic_ops", historic_ops_hook,
-                                         "show slowest recent ops");
+  asok_hook = new OSDSocketHook(this);
+  r = admin_socket->register_command("dump_ops_in_flight", asok_hook,
+				     "show the ops currently in flight");
+  assert(r == 0);
+  r = admin_socket->register_command("dump_historic_ops", asok_hook,
+				     "show slowest recent ops");
+  assert(r == 0);
+  r = admin_socket->register_command("dump_op_pq_state", asok_hook,
+				     "dump op priority queue state");
+  assert(r == 0);
+  test_ops_hook = new TestOpsSocketHook(&(this->service), this->store);
+  r = admin_socket->register_command("setomapval", test_ops_hook,
+                              "setomap <pool-id> <obj-name> <key> <val>");
+  assert(r == 0);
+  r = admin_socket->register_command("rmomapkey", test_ops_hook,
+                               "rmomapkey <pool-id> <obj-name> <key>");
+  assert(r == 0);
+  r = admin_socket->register_command("setomapheader", test_ops_hook,
+                               "setomapheader <pool-id> <obj-name> <header>");
+  assert(r == 0);
+  r = admin_socket->register_command("getomap", test_ops_hook,
+                               "getomap <pool-id> <obj-name>");
   assert(r == 0);
 
   service.init();
@@ -1090,6 +1131,8 @@ void OSD::suicide(int exitcode)
 
 int OSD::shutdown()
 {
+  g_conf->remove_observer(this);
+
   service.shutdown();
   g_ceph_context->_conf->set_val("debug_osd", "100");
   g_ceph_context->_conf->set_val("debug_journal", "100");
@@ -1120,10 +1163,17 @@ int OSD::shutdown()
   dout(10) << "no ops" << dendl;
 
   cct->get_admin_socket()->unregister_command("dump_ops_in_flight");
-  delete admin_ops_hook;
-  delete historic_ops_hook;
-  admin_ops_hook = NULL;
-  historic_ops_hook = NULL;
+  cct->get_admin_socket()->unregister_command("dump_historic_ops");
+  cct->get_admin_socket()->unregister_command("dump_op_pq_state");
+  delete asok_hook;
+  asok_hook = NULL;
+
+  cct->get_admin_socket()->unregister_command("setomapval");
+  cct->get_admin_socket()->unregister_command("rmomapkey");
+  cct->get_admin_socket()->unregister_command("setomapheader");
+  cct->get_admin_socket()->unregister_command("getomap");
+  delete test_ops_hook;
+  test_ops_hook = NULL;
 
   recovery_tp.stop();
   dout(10) << "recovery tp stopped" << dendl;
@@ -2286,9 +2336,118 @@ void OSD::check_ops_in_flight()
   return;
 }
 
-void OSD::dump_ops_in_flight(ostream& ss)
+// Usage:
+//   setomapval <pool-id> <obj-name> <key> <val>
+//   rmomapkey <pool-id> <obj-name> <key>
+//   setomapheader <pool-id> <obj-name> <header>
+void TestOpsSocketHook::test_ops(OSDService *service, ObjectStore *store,
+     std::string command, std::string args, ostream &ss)
 {
-  op_tracker.dump_ops_in_flight(ss);
+  //Test support
+  //Support changing the omap on a single osd by using the Admin Socket to
+  //directly request the osd make a change.
+  if (command == "setomapval" || command == "rmomapkey" ||
+        command == "setomapheader" || command == "getomap") {
+    std::vector<std::string> argv;
+    pg_t rawpg, pgid;
+    int64_t pool;
+    OSDMapRef curmap = service->get_osdmap();
+    int r;
+
+    argv.push_back(command);
+    string_to_vec(argv, args);
+    int argc = argv.size();
+
+    if (argc < 3) {
+      ss << "Illegal request";
+      return;
+    }
+ 
+    pool = curmap->const_lookup_pg_pool_name(argv[1].c_str());
+    //If we can't find it my name then maybe id specified
+    if (pool < 0 && isdigit(argv[1].c_str()[0]))
+      pool = atoll(argv[1].c_str());
+    r = -1;
+    if (pool >= 0)
+        r = curmap->object_locator_to_pg(object_t(argv[2]),
+          object_locator_t(pool), rawpg);
+    if (r < 0) {
+        ss << "Invalid pool " << argv[1];
+        return;
+    }
+    pgid = curmap->raw_pg_to_pg(rawpg);
+
+    hobject_t obj(object_t(argv[2]), string(""), CEPH_NOSNAP, rawpg.ps(), pool);
+    ObjectStore::Transaction t;
+
+    if (command == "setomapval") {
+      if (argc != 5) {
+        ss << "usage: setomapval <pool> <obj-name> <key> <val>";
+        return;
+      }
+      map<string, bufferlist> newattrs;
+      bufferlist val;
+      string key(argv[3]);
+ 
+      val.append(argv[4]);
+      newattrs[key] = val;
+      t.omap_setkeys(coll_t(pgid), obj, newattrs);
+      r = store->apply_transaction(t);
+      if (r < 0)
+        ss << "error=" << r;
+      else
+        ss << "ok";
+    } else if (command == "rmomapkey") {
+      if (argc != 4) {
+        ss << "usage: rmomapkey <pool> <obj-name> <key>";
+        return;
+      }
+      set<string> keys;
+
+      keys.insert(string(argv[3]));
+      t.omap_rmkeys(coll_t(pgid), obj, keys);
+      r = store->apply_transaction(t);
+      if (r < 0)
+        ss << "error=" << r;
+      else
+        ss << "ok";
+    } else if (command == "setomapheader") {
+      if (argc != 4) {
+        ss << "usage: setomapheader <pool> <obj-name> <header>";
+        return;
+      }
+      bufferlist newheader;
+
+      newheader.append(argv[3]);
+      t.omap_setheader(coll_t(pgid), obj, newheader);
+      r = store->apply_transaction(t);
+      if (r < 0)
+        ss << "error=" << r;
+      else
+        ss << "ok";
+    } else if (command == "getomap") {
+      if (argc != 3) {
+        ss << "usage: getomap <pool> <obj-name>";
+        return;
+      }
+      //Debug: Output entire omap
+      bufferlist hdrbl;
+      map<string, bufferlist> keyvals;
+      r = store->omap_get(coll_t(pgid), obj, &hdrbl, &keyvals);
+      if (r >= 0) {
+          ss << "header=" << string(hdrbl.c_str(), hdrbl.length());
+          for (map<string, bufferlist>::iterator it = keyvals.begin();
+              it != keyvals.end(); it++)
+            ss << " key=" << (*it).first << " val="
+               << string((*it).second.c_str(), (*it).second.length());
+      } else {
+          ss << "error=" << r;
+      }
+    }
+    return;
+  }
+  ss << "Internal error - command=" << command;
+  return;
 }
 
 // =========================================
@@ -3676,7 +3835,7 @@ void OSD::wait_for_new_map(OpRequestRef op)
   }
   
   waiting_for_osdmap.push_back(op);
-  op->mark_delayed();
+  op->mark_delayed("wait for new map");
 }
 
 
@@ -5904,7 +6063,7 @@ void OSD::handle_op(OpRequestRef op)
     if (osdmap->get_pg_acting_role(pgid, whoami) >= 0) {
       dout(7) << "we are valid target for op, waiting" << dendl;
       waiting_for_pg[pgid].push_back(op);
-      op->mark_delayed();
+      op->mark_delayed("waiting for pg to exist locally");
       return;
     }
 
@@ -6036,14 +6195,18 @@ bool OSD::op_is_discardable(MOSDOp *op)
  */
 void OSD::enqueue_op(PG *pg, OpRequestRef op)
 {
-  dout(15) << "enqueue_op " << op << " " << *(op->request) << dendl;
+  utime_t latency = ceph_clock_now(g_ceph_context) - op->request->get_recv_stamp();
+  dout(15) << "enqueue_op " << op << " prio " << op->request->get_priority()
+	   << " cost " << op->request->get_cost()
+	   << " latency " << latency
+	   << " " << *(op->request) << dendl;
   op_wq.queue(make_pair(PGRef(pg), op));
 }
 
 void OSD::OpWQ::_enqueue(pair<PGRef, OpRequestRef> item)
 {
   unsigned priority = item.second->request->get_priority();
-  unsigned cost = item.second->request->get_data().length();
+  unsigned cost = item.second->request->get_cost();
   if (priority >= CEPH_MSG_PRIO_LOW)
     pqueue.enqueue_strict(
       item.second->request->get_source_inst(),
@@ -6065,7 +6228,7 @@ void OSD::OpWQ::_enqueue_front(pair<PGRef, OpRequestRef> item)
     }
   }
   unsigned priority = item.second->request->get_priority();
-  unsigned cost = item.second->request->get_data().length();
+  unsigned cost = item.second->request->get_cost();
   if (priority >= CEPH_MSG_PRIO_LOW)
     pqueue.enqueue_strict_front(
       item.second->request->get_source_inst(),
@@ -6121,7 +6284,11 @@ void OSDService::dequeue_pg(PG *pg, list<OpRequestRef> *dequeued)
  */
 void OSD::dequeue_op(PGRef pg, OpRequestRef op)
 {
-  dout(10) << "dequeue_op " << op << " " << *(op->request)
+  utime_t latency = ceph_clock_now(g_ceph_context) - op->request->get_recv_stamp();
+  dout(10) << "dequeue_op " << op << " prio " << op->request->get_priority()
+	   << " cost " << op->request->get_cost()
+	   << " latency " << latency
+	   << " " << *(op->request)
 	   << " pg " << *pg << dendl;
   if (pg->deleting)
     return;
@@ -6208,6 +6375,26 @@ void OSD::process_peering_events(const list<PG*> &pgs)
   dispatch_context(rctx, 0, curmap);
 
   service.send_pg_temp();
+}
+
+// --------------------------------
+
+const char** OSD::get_tracked_conf_keys() const
+{
+  static const char* KEYS[] = {
+    "osd_max_backfills",
+    NULL
+  };
+  return KEYS;
+}
+
+void OSD::handle_conf_change(const struct md_config_t *conf,
+			     const std::set <std::string> &changed)
+{
+  if (changed.count("osd_max_backfills")) {
+    service.local_reserver.set_max(g_conf->osd_max_backfills);
+    service.remote_reserver.set_max(g_conf->osd_max_backfills);
+  }
 }
 
 // --------------------------------

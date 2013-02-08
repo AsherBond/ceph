@@ -7,6 +7,7 @@
     user rm                    remove user
     user suspend               suspend a user
     user enable                reenable user after suspension
+    user check                 check user info
     caps add                   add user capabilities
     caps rm                    remove user capabilities
     subuser create             create a new subuser
@@ -21,6 +22,7 @@
     bucket rm                  remove bucket
     bucket check               check bucket index
     object rm                  remove object
+    object unlink              unlink object from bucket index
     cluster info               show cluster params info
     pool add                   add an existing pool for data placement
     pool rm                    remove an existing pool from data placement set

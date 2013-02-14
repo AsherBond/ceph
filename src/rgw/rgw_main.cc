@@ -162,7 +162,7 @@ class RGWProcess {
     }
     void _dump_queue() {
       deque<RGWRequest *>::iterator iter;
-      if (process->m_req_queue.size() == 0) {
+      if (process->m_req_queue.empty()) {
         dout(20) << "RGWWQ: empty" << dendl;
         return;
       }
@@ -222,6 +222,13 @@ void RGWProcess::run()
     }
     if (chmod(path, 0777) < 0) {
       dout(0) << "WARNING: couldn't set permissions on unix domain socket" << dendl;
+    }
+  } else if (!g_conf->rgw_port.empty()) {
+    string bind = g_conf->rgw_host + ":" + g_conf->rgw_port;
+    sock_fd = FCGX_OpenSocket(bind.c_str(), SOCKET_BACKLOG);
+    if (sock_fd < 0) {
+      dout(0) << "ERROR: FCGX_OpenSocket (" << bind.c_str() << ") returned " << sock_fd << dendl;
+      return;
     }
   }
 
@@ -398,8 +405,8 @@ int main(int argc, const char **argv)
 	      CINIT_FLAG_UNPRIVILEGED_DAEMON_DEFAULTS);
 
   if (g_conf->daemonize) {
-    if (g_conf->rgw_socket_path.empty()) {
-      cerr << "radosgw: must specify 'rgw socket path' to run as a daemon" << std::endl;
+    if (g_conf->rgw_socket_path.empty() and g_conf->rgw_port.empty()) {
+      cerr << "radosgw: must specify 'rgw socket path' or 'rgw port' to run as a daemon" << std::endl;
       exit(1);
     }
 

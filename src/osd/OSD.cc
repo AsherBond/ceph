@@ -3545,22 +3545,17 @@ void OSD::do_waiters()
 {
   assert(osd_lock.is_locked());
   
+  dout(10) << "do_waiters -- start" << dendl;
   finished_lock.Lock();
-  if (finished.empty()) {
+  while (!finished.empty()) {
+    OpRequestRef next = finished.front();
+    finished.pop_front();
     finished_lock.Unlock();
-  } else {
-    list<OpRequestRef> waiting;
-    waiting.splice(waiting.begin(), finished);
-
-    finished_lock.Unlock();
-    
-    dout(10) << "do_waiters -- start" << dendl;
-    for (list<OpRequestRef>::iterator it = waiting.begin();
-         it != waiting.end();
-         it++)
-      dispatch_op(*it);
-    dout(10) << "do_waiters -- finish" << dendl;
+    dispatch_op(next);
+    finished_lock.Lock();
   }
+  finished_lock.Unlock();
+  dout(10) << "do_waiters -- finish" << dendl;
 }
 
 void OSD::dispatch_op(OpRequestRef op)
@@ -4236,12 +4231,8 @@ void OSD::check_osdmap_features()
   // current memory location, and setting or clearing bits in integer
   // fields, and we are the only writer, this is not a problem.
 
-  uint64_t mask = CEPH_FEATURES_CRUSH;
-  uint64_t features = 0;
-  if (osdmap->crush->has_nondefault_tunables())
-    features |= CEPH_FEATURE_CRUSH_TUNABLES;
-  if (osdmap->crush->has_nondefault_tunables2())
-    features |= CEPH_FEATURE_CRUSH_TUNABLES2;
+  uint64_t mask;
+  uint64_t features = osdmap->get_features(&mask);
 
   {
     Messenger::Policy p = client_messenger->get_default_policy();

@@ -159,19 +159,14 @@ void OSDMonitor::update_from_paxos()
 
 void OSDMonitor::update_msgr_features()
 {
+  uint64_t mask;
+  uint64_t features = osdmap.get_features(&mask);
+
   set<int> types;
   types.insert((int)entity_name_t::TYPE_OSD);
   types.insert((int)entity_name_t::TYPE_CLIENT);
   types.insert((int)entity_name_t::TYPE_MDS);
   types.insert((int)entity_name_t::TYPE_MON);
-
-  uint64_t mask = CEPH_FEATURES_CRUSH;
-  uint64_t features = 0;
-  if (osdmap.crush->has_nondefault_tunables())
-    features |= CEPH_FEATURE_CRUSH_TUNABLES;
-  if (osdmap.crush->has_nondefault_tunables2())
-    features |= CEPH_FEATURE_CRUSH_TUNABLES2;
-
   for (set<int>::iterator q = types.begin(); q != types.end(); ++q) {
     if ((mon->messenger->get_policy(*q).features_required & mask) != features) {
       dout(0) << "crush map has features " << features << ", adjusting msgr requires" << dendl;
@@ -2076,6 +2071,7 @@ int OSDMonitor::prepare_new_pool(string& name, uint64_t auid, int crush_rule,
     pending_inc.new_pool_max = osdmap.pool_max;
   int64_t pool = ++pending_inc.new_pool_max;
   pending_inc.new_pools[pool].type = pg_pool_t::TYPE_REP;
+  pending_inc.new_pools[pool].type = g_conf->osd_pool_default_flags;
 
   pending_inc.new_pools[pool].size = g_conf->osd_pool_default_size;
   pending_inc.new_pools[pool].min_size = g_conf->get_osd_pool_default_min_size();
@@ -3013,6 +3009,11 @@ bool OSDMonitor::prepare_command(MMonCommand *m)
 	  unsigned n = strtol(start, &end, 10);
 	  if (*end == '\0') {
 	    if (m->cmd[4] == "size") {
+	      if (n == 0 || n > 10) {
+		ss << "pool size must be between 1 and 10";
+		err = -EINVAL;
+		goto out;
+	      }
 	      if (pending_inc.new_pools.count(pool) == 0)
 		pending_inc.new_pools[pool] = *p;
 	      pending_inc.new_pools[pool].size = n;

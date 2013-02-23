@@ -24,6 +24,7 @@
 
 #include "common/admin_socket.h"
 #include "common/Timer.h"
+#include "include/rados/rados_types.h"
 
 #include <list>
 #include <map>
@@ -312,6 +313,37 @@ struct ObjectOperation {
       }	
     }
   };
+  struct C_ObjectOperation_decodewatchers : public Context {
+    bufferlist bl;
+    list<obj_watch_t> *pwatchers;
+    int *prval;
+    C_ObjectOperation_decodewatchers(list<obj_watch_t> *pw, int *pr)
+      : pwatchers(pw), prval(pr) {}
+    void finish(int r) {
+      if (r >= 0) {
+	bufferlist::iterator p = bl.begin();
+	try {
+          obj_list_watch_response_t resp;
+	  ::decode(resp, p);
+	  if (pwatchers) {
+            for (list<watch_item_t>::iterator i = resp.entries.begin() ;
+                    i != resp.entries.end() ; ++i) {
+              obj_watch_t ow;
+              ow.watcher_id = i->name.num();
+              ow.cookie = i->cookie;
+              ow.timeout_seconds = i->timeout_seconds;
+              pwatchers->push_back(ow);
+            }
+          }
+          *prval = 0;
+	}
+	catch (buffer::error& e) {
+	  if (prval)
+	    *prval = -EIO;
+	}
+      }	
+    }
+  };
   void getxattrs(std::map<std::string,bufferlist> *pattrs, int *prval) {
     add_op(CEPH_OSD_OP_GETXATTRS);
     if (pattrs || prval) {
@@ -492,6 +524,19 @@ struct ObjectOperation {
     ::encode(notify_id, bl);
     ::encode(cookie, bl);
     add_watch(CEPH_OSD_OP_NOTIFY_ACK, notify_id, ver, 0, bl);
+  }
+
+  void list_watchers(list<obj_watch_t> *out,
+		     int *prval) {
+    (void)add_op(CEPH_OSD_OP_LIST_WATCHERS);
+    if (prval || out) {
+      unsigned p = ops.size() - 1;
+      C_ObjectOperation_decodewatchers *h =
+	new C_ObjectOperation_decodewatchers(out, prval);
+      out_handler[p] = h;
+      out_bl[p] = &h->bl;
+      out_rval[p] = prval;
+    }
   }
 
   void assert_version(uint64_t ver) {
@@ -803,6 +848,9 @@ public:
     vector<int> acting;
 
     snapid_t snap;
+    SnapContext snapc;
+    utime_t mtime;
+
     int flags;
     vector<OSDOp> ops;
     bufferlist inbl;
@@ -818,7 +866,8 @@ public:
     tid_t register_tid;
     epoch_t map_dne_bound;
 
-    LingerOp() : linger_id(0), flags(0), poutbl(NULL), pobjver(NULL),
+    LingerOp() : linger_id(0), snap(CEPH_NOSNAP), flags(0),
+		 poutbl(NULL), pobjver(NULL),
 		 registered(false),
 		 on_reg_ack(NULL), on_reg_commit(NULL),
 		 session(NULL), session_item(this),
@@ -1069,11 +1118,17 @@ private:
     o->out_rval.swap(op.out_rval);
     return op_submit(o);
   }
-  tid_t linger(const object_t& oid, const object_locator_t& oloc, 
-	       ObjectOperation& op,
-	       snapid_t snap, bufferlist& inbl, bufferlist *poutbl, int flags,
-               Context *onack, Context *onfinish,
-               eversion_t *objver);
+  tid_t linger_mutate(const object_t& oid, const object_locator_t& oloc,
+		      ObjectOperation& op,
+		      const SnapContext& snapc, utime_t mtime,
+		      bufferlist& inbl, int flags,
+		      Context *onack, Context *onfinish,
+		      eversion_t *objver);
+  tid_t linger_read(const object_t& oid, const object_locator_t& oloc,
+		    ObjectOperation& op,
+		    snapid_t snap, bufferlist& inbl, bufferlist *poutbl, int flags,
+		    Context *onack,
+		    eversion_t *objver);
   void unregister_linger(uint64_t linger_id);
 
   /**

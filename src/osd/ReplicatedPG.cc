@@ -564,30 +564,45 @@ void ReplicatedPG::do_pg_op(OpRequestRef op)
 
 void ReplicatedPG::calc_trim_to()
 {
-  if (!is_degraded() && !is_scrubbing() && is_clean()) {
-    if (min_last_complete_ondisk != eversion_t() &&
-	min_last_complete_ondisk != pg_trim_to &&
-	log.approx_size() > g_conf->osd_min_pg_log_entries) {
-      size_t num_to_trim = log.approx_size() - g_conf->osd_min_pg_log_entries;
-      list<pg_log_entry_t>::const_iterator it = log.log.begin();
-      eversion_t new_trim_to;
-      for (size_t i = 0; i < num_to_trim; ++i) {
-	new_trim_to = it->version;
-	++it;
-	if (new_trim_to > min_last_complete_ondisk) {
-	  new_trim_to = min_last_complete_ondisk;
-	  dout(10) << "calc_trim_to trimming to min_last_complete_ondisk" << dendl;
-	  break;
-	}
-      }
-      dout(10) << "calc_trim_to " << pg_trim_to << " -> " << new_trim_to << dendl;
-      pg_trim_to = new_trim_to;
-      assert(pg_trim_to <= log.head);
-      assert(pg_trim_to <= min_last_complete_ondisk);
-    }
-  } else {
-    // don't trim
+  if (state_test(PG_STATE_RECOVERING |
+		 PG_STATE_RECOVERY_WAIT |
+		 PG_STATE_BACKFILL |
+		 PG_STATE_BACKFILL_WAIT |
+		 PG_STATE_BACKFILL_TOOFULL)) {
+    dout(10) << "calc_trim_to no trim during recovery" << dendl;
     pg_trim_to = eversion_t();
+    return;
+  }
+
+  if (is_scrubbing() && scrubber.classic) {
+    dout(10) << "calc_trim_to no trim during classic scrub" << dendl;
+    pg_trim_to = eversion_t();
+    return;
+  }
+
+  size_t target = g_conf->osd_min_pg_log_entries;
+  if (is_degraded())
+    target = g_conf->osd_max_pg_log_entries;
+
+  if (min_last_complete_ondisk != eversion_t() &&
+      min_last_complete_ondisk != pg_trim_to &&
+      log.approx_size() > target) {
+    size_t num_to_trim = log.approx_size() - target;
+    list<pg_log_entry_t>::const_iterator it = log.log.begin();
+    eversion_t new_trim_to;
+    for (size_t i = 0; i < num_to_trim; ++i) {
+      new_trim_to = it->version;
+      ++it;
+      if (new_trim_to > min_last_complete_ondisk) {
+	new_trim_to = min_last_complete_ondisk;
+	dout(10) << "calc_trim_to trimming to min_last_complete_ondisk" << dendl;
+	break;
+      }
+    }
+    dout(10) << "calc_trim_to " << pg_trim_to << " -> " << new_trim_to << dendl;
+    pg_trim_to = new_trim_to;
+    assert(pg_trim_to <= log.head);
+    assert(pg_trim_to <= min_last_complete_ondisk);
   }
 }
 
@@ -4542,7 +4557,7 @@ void ReplicatedPG::sub_op_modify_applied(RepModify *rm)
   rm->op->mark_event("sub_op_applied");
   rm->applied = true;
 
-  if (rm->epoch_started >= last_peering_reset) {
+  if (!pg_has_reset_since(rm->epoch_started)) {
     dout(10) << "sub_op_modify_applied on " << rm << " op " << *rm->op->request << dendl;
     MOSDSubOp *m = (MOSDSubOp*)rm->op->request;
     assert(m->get_header().type == MSG_OSD_SUBOP);
@@ -4584,7 +4599,7 @@ void ReplicatedPG::sub_op_modify_commit(RepModify *rm)
   rm->op->mark_commit_sent();
   rm->committed = true;
 
-  if (rm->epoch_started >= last_peering_reset) {
+  if (!pg_has_reset_since(rm->epoch_started)) {
     // send commit.
     dout(10) << "sub_op_modify_commit on op " << *rm->op->request
 	     << ", sending commit to osd." << rm->ackerosd
@@ -5258,9 +5273,10 @@ void ReplicatedPG::handle_pull_response(OpRequestRef op)
     queue_transaction(
       osr.get(), t,
       onreadable,
-      new C_OSD_CommittedPushedObject(this, op,
-				      info.history.same_interval_since,
-				      info.last_complete),
+      new C_OSD_CommittedPushedObject(
+	this, op,
+	get_osdmap()->get_epoch(),
+	info.last_complete),
       onreadable_sync,
       oncomplete,
       TrackedOpRef()
@@ -5331,7 +5347,7 @@ void ReplicatedPG::handle_push(OpRequestRef op)
       onreadable,
       new C_OSD_CommittedPushedObject(
 	this, op,
-	info.history.same_interval_since,
+	get_osdmap()->get_epoch(),
 	info.last_complete),
       onreadable_sync,
       oncomplete,
@@ -5612,10 +5628,11 @@ void ReplicatedPG::sub_op_pull(OpRequestRef op)
 }
 
 
-void ReplicatedPG::_committed_pushed_object(OpRequestRef op, epoch_t same_since, eversion_t last_complete)
+void ReplicatedPG::_committed_pushed_object(
+  OpRequestRef op, epoch_t epoch, eversion_t last_complete)
 {
   lock();
-  if (same_since == info.history.same_interval_since) {
+  if (!pg_has_reset_since(epoch)) {
     dout(10) << "_committed_pushed_object last_complete " << last_complete << " now ondisk" << dendl;
     last_complete_ondisk = last_complete;
 
@@ -6440,9 +6457,10 @@ int ReplicatedPG::recover_primary(int max)
 
 	      osd->store->queue_transaction(osr.get(), t,
 					    new C_OSD_AppliedRecoveredObject(this, t, obc),
-					    new C_OSD_CommittedPushedObject(this, OpRequestRef(),
-									    info.history.same_interval_since,
-									    info.last_complete),
+					    new C_OSD_CommittedPushedObject(
+					      this, OpRequestRef(),
+					      get_osdmap()->get_epoch(),
+					      info.last_complete),
 					    new C_OSD_OndiskWriteUnlock(obc));
 	      continue;
 	    }

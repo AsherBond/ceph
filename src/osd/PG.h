@@ -834,6 +834,7 @@ public:
       block_writes(false), active(false), queue_snap_trim(false),
       waiting_on(0), errors(0), fixed(0), active_rep_scrub(0),
       must_scrub(false), must_deep_scrub(false), must_repair(false),
+      classic(false),
       finalizing(false), is_chunky(false), state(INACTIVE),
       deep(false)
     {
@@ -869,6 +870,7 @@ public:
     map<hobject_t, pair<ScrubMap::object, int> > authoritative;
 
     // classic scrub
+    bool classic;
     bool finalizing;
 
     // chunky scrub
@@ -940,6 +942,7 @@ public:
 
     // clear all state
     void reset() {
+      classic = false;
       finalizing = false;
       block_writes = false;
       active = false;
@@ -1841,6 +1844,10 @@ public:
 		   list<Context *> *on_applied,
 		   list<Context *> *on_safe);
   void set_last_peering_reset();
+  bool pg_has_reset_since(epoch_t e) {
+    assert(is_locked());
+    return deleting || e < get_last_peering_reset();
+  }
 
   void update_history_from_master(pg_history_t new_history);
   void fulfill_info(int from, const pg_query_t &query, 

@@ -1108,7 +1108,7 @@ void ReplicatedPG::log_subop_stats(OpRequestRef op, int tag_inb, int tag_lat)
 void ReplicatedPG::do_sub_op(OpRequestRef op)
 {
   MOSDSubOp *m = static_cast<MOSDSubOp*>(op->request);
-  assert(require_same_or_newer_map(m->map_epoch));
+  assert(have_same_or_newer_map(m->map_epoch));
   assert(m->get_header().type == MSG_OSD_SUBOP);
   dout(15) << "do_sub_op " << *op->request << dendl;
 
@@ -2243,6 +2243,94 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
           watch_item_t wi(oi_iter->first.second, oi_iter->second.cookie,
                  oi_iter->second.timeout_seconds);
           resp.entries.push_back(wi);
+        }
+
+        resp.encode(osd_op.outdata);
+        result = 0;
+
+        ctx->delta_stats.num_rd++;
+        break;
+      }
+
+    case CEPH_OSD_OP_LIST_SNAPS:
+      {
+        obj_list_snap_response_t resp;
+
+        if (!ssc) {
+            ssc = ctx->obc->ssc = get_snapset_context(soid.oid,
+                soid.get_key(), soid.hash, false);
+        }
+
+        assert(ssc);
+
+        vector<snapid_t>::reverse_iterator snap_iter =
+            ssc->snapset.snaps.rbegin();
+
+        int clonecount = ssc->snapset.clones.size();
+        if (ssc->snapset.head_exists)
+          clonecount++;
+        resp.clones.reserve(clonecount);
+        for (vector<snapid_t>::const_iterator clone_iter = ssc->snapset.clones.begin();
+               clone_iter != ssc->snapset.clones.end(); ++clone_iter) {
+          clone_info ci;
+
+          dout(20) << "List clones id=" << *clone_iter << dendl;
+
+          ci.cloneid = *clone_iter;
+
+          for (;snap_iter != ssc->snapset.snaps.rend()
+               && (*snap_iter <= ci.cloneid); snap_iter++) {
+
+            dout(20) << "List snaps id=" << *snap_iter << dendl;
+
+            assert(*snap_iter != CEPH_NOSNAP);
+            assert(*snap_iter != CEPH_SNAPDIR);
+
+            ci.snaps.push_back(*snap_iter);
+          }
+
+          map<snapid_t, interval_set<uint64_t> >::const_iterator coi;
+          coi = ssc->snapset.clone_overlap.find(ci.cloneid);
+          if (coi == ssc->snapset.clone_overlap.end()) {
+            osd->clog.error() << "osd." << osd->whoami << ": inconsistent clone_overlap found for oid "
+                    << soid << " clone " << *clone_iter;
+            result = EINVAL;
+            break;
+          }
+          const interval_set<uint64_t> &o = coi->second;
+          ci.overlap.reserve(o.num_intervals());
+          for (interval_set<uint64_t>::const_iterator r = o.begin();
+               r != o.end(); ++r) {
+            ci.overlap.push_back(pair<uint64_t,uint64_t>(r.get_start(), r.get_len()));
+          }
+
+          map<snapid_t, uint64_t>::const_iterator si;
+          si = ssc->snapset.clone_size.find(ci.cloneid);
+          if (si == ssc->snapset.clone_size.end()) {
+            osd->clog.error() << "osd." << osd->whoami << ": inconsistent clone_size found for oid "
+                    << soid << " clone " << *clone_iter;
+            result = EINVAL;
+            break;
+          }
+          ci.size = si->second;
+
+          resp.clones.push_back(ci);
+        }
+        if (ssc->snapset.head_exists) {
+          clone_info ci;
+
+          assert(obs.exists);
+
+          ci.cloneid = clone_info::HEAD;
+
+          //Put remaining snapshots into head clone
+          for (;snap_iter != ssc->snapset.snaps.rend(); snap_iter++)
+            ci.snaps.push_back(*snap_iter);
+
+          //Size for HEAD is oi.size
+          ci.size = oi.size;
+
+          resp.clones.push_back(ci);
         }
 
         resp.encode(osd_op.outdata);
@@ -4493,6 +4581,7 @@ void ReplicatedPG::sub_op_modify(OpRequestRef op)
 	}
 	rm->opt.set_pool_override(info.pgid.pool());
       }
+      rm->opt.set_replica();
       
       info.stats = m->pg_stats;
       if (!rm->opt.empty()) {

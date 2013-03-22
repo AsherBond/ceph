@@ -33,7 +33,6 @@
 
 #include "common/config.h"
 #include "include/assert.h"
-#include <sstream>
 
 #define dout_subsys ceph_subsys_mon
 #undef dout_prefix
@@ -440,14 +439,16 @@ bool AuthMonitor::prep_auth(MAuth *m, bool paxos_writable)
   if (!s->global_id) {
     s->global_id = assign_global_id(m, paxos_writable);
     if (!s->global_id) {
+
+      delete s->auth_handler;
+      s->auth_handler = NULL;
+
       if (mon->is_leader() && paxos_writable) {
         dout(10) << "increasing global id, waitlisting message" << dendl;
         wait_for_active(new C_RetryMessage(this, m));
         goto done;
       }
 
-      delete s->auth_handler;
-      s->auth_handler = NULL;
       s->put();
 
       if (!mon->is_leader()) {

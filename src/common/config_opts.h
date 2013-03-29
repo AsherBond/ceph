@@ -165,6 +165,7 @@ OPTION(mon_max_log_entries_per_event, OPT_INT, 4096)
 OPTION(mon_health_data_update_interval, OPT_FLOAT, 60.0)
 OPTION(mon_data_avail_crit, OPT_INT, 5)
 OPTION(mon_data_avail_warn, OPT_INT, 30)
+OPTION(mon_config_key_max_entry_size, OPT_INT, 4096) // max num bytes per config-key entry
 OPTION(mon_sync_trim_timeout, OPT_DOUBLE, 30.0)
 OPTION(mon_sync_heartbeat_timeout, OPT_DOUBLE, 30.0)
 OPTION(mon_sync_heartbeat_interval, OPT_DOUBLE, 5.0)
@@ -506,6 +507,7 @@ OPTION(rbd_cache_size, OPT_LONGLONG, 32<<20)         // cache size in bytes
 OPTION(rbd_cache_max_dirty, OPT_LONGLONG, 24<<20)    // dirty limit in bytes - set to 0 for write-through caching
 OPTION(rbd_cache_target_dirty, OPT_LONGLONG, 16<<20) // target dirty limit in bytes
 OPTION(rbd_cache_max_dirty_age, OPT_FLOAT, 1.0)      // seconds in cache before writeback starts
+OPTION(rbd_cache_block_writes_upfront, OPT_BOOL, false) // whether to block writes to the cache before the aio_write call completes (true), or block before the aio completion is called (false)
 
 OPTION(nss_db_path, OPT_STR, "") // path to nss db
 

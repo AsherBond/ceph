@@ -185,7 +185,8 @@ Client::Client(Messenger *m, MonClient *mc)
 				  cct->_conf->client_oc_max_objects,
 				  cct->_conf->client_oc_max_dirty,
 				  cct->_conf->client_oc_target_dirty,
-				  cct->_conf->client_oc_max_dirty_age);
+				  cct->_conf->client_oc_max_dirty_age,
+				  true);
   filer = new Filer(objecter);
 }
 
@@ -2709,11 +2710,7 @@ bool Client::_flush(Inode *in, Context *onfinish)
   if (!onfinish) {
     onfinish = new C_Client_PutInode(this, in);
   }
-  bool safe = objectcacher->flush_set(&in->oset, onfinish);
-  if (safe) {
-    onfinish->complete(0);
-  }
-  return safe;
+  return objectcacher->flush_set(&in->oset, onfinish);
 }
 
 void Client::_flush_range(Inode *in, int64_t offset, uint64_t size)
@@ -3567,6 +3564,7 @@ void Client::handle_cap_grant(MetaSession *session, Inode *in, Cap *cap, MClient
   if (old_caps & ~new_caps) { 
     ldout(cct, 10) << "  revocation of " << ccap_string(~new_caps & old_caps) << dendl;
     cap->issued = new_caps;
+    cap->implemented |= new_caps;
 
     if ((~cap->issued & old_caps) & CEPH_CAP_FILE_CACHE)
       _release(in);

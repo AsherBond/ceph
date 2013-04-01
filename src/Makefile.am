@@ -425,6 +425,7 @@ librbd_la_SOURCES = \
 	librbd/WatchCtx.cc \
 	osdc/ObjectCacher.cc \
 	osdc/Striper.cc \
+	librados/snap_set_diff.cc \
 	cls/lock/cls_lock_client.cc \
 	cls/lock/cls_lock_types.cc \
 	cls/lock/cls_lock_ops.cc \
@@ -876,11 +877,13 @@ unittest_texttable_LDADD = librados.la ${UNITTEST_LDADD}
 unittest_texttable_CXXFLAGS = ${AM_CXXFLAGS} ${UNITTEST_CXXFLAGS}
 check_PROGRAMS += unittest_texttable
 
+if WITH_RADOSGW
 ceph_test_cors_SOURCES = test/test_cors.cc
 ceph_test_cors_LDFLAGS = libglobal.la
 ceph_test_cors_LDADD = librados.la librgw.a ${UNITTEST_LDADD} ${UNITTEST_STATIC_LDADD} -lcryptopp -lcurl -luuid -lexpat
 ceph_test_cors_CXXFLAGS = ${AM_CXXFLAGS} ${UNITTEST_CXXFLAGS}
 bin_DEBUGPROGRAMS += ceph_test_cors
+endif
 
 ceph_test_librbd_SOURCES = test/librbd/test_librbd.cc test/librados/test.cc
 ceph_test_librbd_LDADD =  librbd.la librados.la ${UNITTEST_STATIC_LDADD}
@@ -1701,6 +1704,7 @@ noinst_HEADERS = \
 	include/rbd/librbd.h\
 	include/rbd/librbd.hpp\
         include/util.h\
+	librados/snap_set_diff.h\
 	librados/AioCompletionImpl.h\
 	librados/IoCtxImpl.h\
 	librados/PoolAsyncCompletionImpl.h\

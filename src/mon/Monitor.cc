@@ -1034,7 +1034,7 @@ void Monitor::handle_sync_finish(MMonSync *m)
 
 // synchronization provider
 
-string Monitor::_pick_random_mon(int other)
+string Monitor::_pick_random_mon()
 {
   assert(monmap->size() > 0);
   if (monmap->size() == 1)
@@ -1042,8 +1042,6 @@ string Monitor::_pick_random_mon(int other)
 
   int max = monmap->size();
   int n = sync_rng() % max;
-  if (other >= 0 && n >= other)
-    n++;
   return monmap->get_name(n);
 }
 
@@ -1902,7 +1900,9 @@ void Monitor::handle_probe_reply(MMonProbe *m)
   if (m->quorum.size()) {
     dout(10) << " existing quorum " << m->quorum << dendl;
 
-    if (paxos->get_version() + g_conf->paxos_max_join_drift < m->paxos_last_version) {
+    if ((paxos->get_version() + g_conf->paxos_max_join_drift <
+	m->paxos_last_version) ||
+	(paxos->get_version() < m->paxos_first_version)){
       dout(10) << " peer paxos version " << m->paxos_last_version
 	       << " vs my version " << paxos->get_version()
 	       << " (too far ahead)"
@@ -3427,8 +3427,8 @@ void Monitor::timecheck()
            << " round " << timecheck_round << dendl;
 
   // we are at the eye of the storm; the point of reference
-  timecheck_skews[monmap->get_inst(name)] = 0.0;
-  timecheck_latencies[monmap->get_inst(name)] = 0.0;
+  timecheck_skews[messenger->get_myinst()] = 0.0;
+  timecheck_latencies[messenger->get_myinst()] = 0.0;
 
   for (set<int>::iterator it = quorum.begin(); it != quorum.end(); ++it) {
     if (monmap->get_name(*it) == name)

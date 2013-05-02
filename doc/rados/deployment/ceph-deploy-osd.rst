@@ -24,10 +24,6 @@ To list the disks on a host, execute the following command::
 
 	ceph-deploy disk list {host-name [host-name]...}
 
-Or: 
-
-	ceph-disk-prepare list {host-name [host-name]...}
-
 
 Zap Disks
 =========
@@ -88,6 +84,8 @@ To list the OSDs deployed on a host(s), execute the following command::
 
 Destroy OSDs
 ============
+
+.. note:: Coming soon.
 
 To destroy an OSD, execute the following command:: 
 

@@ -15,6 +15,15 @@ Upgrading from v0.60
 
 .. _Transitioning to ceph-deploy: rados/deployment/ceph-deploy-transition
 
+* The sysvinit script (/etc/init.d/ceph) will now verify (and, if
+  necessary, update) the OSD's position in the CRUSH map on startup.
+  (The upstart script has always worked this way.) By default, this
+  ensures that the OSD is under a 'host' with a name that matches the
+  hostname (``hostname -s``).  Legacy clusters create with mkcephfs do
+  this by default, so this should not cause any problems, but legacy
+  clusters with customized CRUSH maps with an alternate structure
+  should set ``osd crush update on start = false``.
+
 * radosgw-admin now uses the term zone instead of cluster to describe
   each instance of the radosgw data store (and corresponding
   collection of radosgw daemons).  The usage for the radosgw-admin
@@ -53,6 +62,15 @@ Please see `Upgrading from Bobtail to Cuttlefish`_ for details.
   path, documented at `Transitioning to ceph-deploy`_.
 
 .. _Transitioning to ceph-deploy: rados/deployment/ceph-deploy-transition
+
+* The sysvinit script (/etc/init.d/ceph) will now verify (and, if
+  necessary, update) the OSD's position in the CRUSH map on startup.
+  (The upstart script has always worked this way.) By default, this
+  ensures that the OSD is under a 'host' with a name that matches the
+  hostname (``hostname -s``).  Legacy clusters create with mkcephfs do
+  this by default, so this should not cause any problems, but legacy
+  clusters with customized CRUSH maps with an alternate structure
+  should set ``osd crush update on start = false``.
 
 * radosgw-admin now uses the term zone instead of cluster to describe
   each instance of the radosgw data store (and corresponding
@@ -431,6 +449,37 @@ Notable Changes
 * auth: ability to require new cephx signatures on messages (still off by default)
 
 
+v0.56.5 "bobtail"
+-----------------
+
+Upgrading
+~~~~~~~~~
+
+* ceph-disk[-prepare,-activate] behavior has changed in various ways.
+  There should not be any compatibility issues, but chef users should
+  be aware.
+
+Notable changes
+~~~~~~~~~~~~~~~
+
+* mon: fix recording of quorum feature set (important for argonaut -> bobtail -> cuttlefish mon upgrades)
+* osd: minor peering bug fixes
+* osd: fix a few bugs when pools are renamed
+* osd: fix occasionally corrupted pg stats
+* osd: fix behavior when broken v0.56[.0] clients connect
+* rbd: avoid FIEMAP ioctl on import (it is broken on some kernels)
+* librbd: fixes for several request/reply ordering bugs
+* librbd: only set STRIPINGV2 feature on new images when needed
+* librbd: new async flush method to resolve qemu hangs (requires Qemu update as well)
+* librbd: a few fixes to flatten
+* ceph-disk: support for dm-crypt
+* ceph-disk: many backports to allow bobtail deployments with ceph-deploy, chef
+* sysvinit: do not stop starting daemons on first failure
+* udev: fixed rules for redhat-based distros
+* build fixes for raring
+
+For more detailed information, see :download:`the complete changelog <changelog/v0.56.5.txt>`.
+
 v0.56.4 "bobtail"
 -----------------
 
@@ -468,6 +517,7 @@ Notable changes
 * mds: on-disk format revision (see upgrading note above)
 * mkcephfs, init-ceph: close potential security issues with predictable filenames
 
+For more detailed information, see :download:`the complete changelog <changelog/v0.56.4.txt>`.
 
 v0.56.3 "bobtail"
 -----------------
@@ -511,6 +561,8 @@ Notable changes
 * radosgw: make fallback URI configurable (necessary on some web servers)
 * librbd: fix handling for interrupted 'unprotect' operations
 * mds, ceph-fuse: allow file and directory layouts to be modified via virtual xattrs
+
+For more detailed information, see :download:`the complete changelog <changelog/v0.56.3.txt>`.
 
 
 v0.56.2 "bobtail"

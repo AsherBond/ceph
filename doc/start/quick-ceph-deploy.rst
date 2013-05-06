@@ -31,20 +31,6 @@ for maintaining the configuration of your cluster. ::
    current directory.
 
 
-Install Ceph
-============
-
-To install Ceph on your server, open a command line on your client
-machine and type the following::
-
-	ceph-deploy install {server-name}[,{server-name}]
-	ceph-deploy install --stable cuttlefish ceph-server
-
-Without additional arguments, ``ceph-deploy`` will install the most recent
-stable Ceph package to the host machine. See `ceph-deploy install -h`_ for
-additional details.
-
-
 Create a Cluster
 ================
 
@@ -67,6 +53,20 @@ See `ceph-deploy new -h`_ for additional details.
 	line to your Ceph configuration file:: 
 	
 		osd crush chooseleaf type = 0 
+
+
+Install Ceph
+============
+
+To install Ceph on your server, open a command line on your client
+machine and type the following::
+
+	ceph-deploy install {server-name}[,{server-name}]
+	ceph-deploy install --stable cuttlefish ceph-server
+
+Without additional arguments, ``ceph-deploy`` will install the most recent
+stable Ceph package to the host machine. See `ceph-deploy install -h`_ for
+additional details.
 
 
 Add a Monitor
@@ -124,6 +124,7 @@ To zap a disk (delete its partition table) in preparation for use with Ceph,
 execute the following::
 
 	ceph-deploy disk zap {osd-server-name}:/path/to/disk
+	ceph-deploy disk zap ceph-server:/dev/sdb1 ceph-server:/dev/sdb2
 
 .. important:: This will delete all data in the partition.
 
@@ -133,9 +134,8 @@ Add OSDs
 
 To prepare an OSD disk and activate it, execute the following:: 
 
-	ceph-deploy osd create {osd-server-name}:/path/to/disk[:/path/to/journal]
-	ceph-deploy osd create {osd-server-name}:/dev/sdb1
-	ceph-deploy osd create {osd-server-name}:/dev/sdb2
+	ceph-deploy osd create {osd-server-name}:/path/to/disk[:/path/to/journal] [{osd-server-name}:/path/to/disk[:/path/to/journal]]
+	ceph-deploy osd create ceph-server:/dev/sdb1 ceph-server:/dev/sdb2
 
 You must add a minimum of two OSDs for the placement groups in a cluster to achieve
 an ``active + clean`` state.  

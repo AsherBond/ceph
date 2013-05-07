@@ -9,7 +9,7 @@ command.
 .. note:: CephFS is in production using 1 metadata server per cluster. You
    **MUST** deploy at least one metadata server to use CephFS.
 
-See `MDS Config Reference`_ for details on configuring monitors.
+See `MDS Config Reference`_ for details on configuring metadata servers.
 
 
 Add a Metadata Server
@@ -23,8 +23,10 @@ You may specify a daemon instance a name (optional) if you would like to run
 multiple daemons on a single server.
 
 
-.. Remove a Metadata Server
-.. ========================
+Remove a Metadata Server
+========================
+
+Coming soon...
 
 .. If you have a metadata server in your cluster that you'd like to remove, you may use 
 .. the ``destroy`` option. :: 

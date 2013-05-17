@@ -2166,7 +2166,8 @@ void FileStore::_set_replay_guard(coll_t cid,
   get_cdir(cid, fn, sizeof(fn));
   int fd = ::open(fn, O_RDONLY);
   if (fd < 0) {
-    derr << "_set_replay_guard " << cid << " error " << fd << dendl;
+    int err = errno;
+    derr << "_set_replay_guard " << cid << " error " << cpp_strerror(err) << dendl;
     assert(0 == "_set_replay_guard failed");
   }
   _set_replay_guard(fd, spos, 0, in_progress);
@@ -2221,7 +2222,8 @@ void FileStore::_close_replay_guard(coll_t cid,
   get_cdir(cid, fn, sizeof(fn));
   int fd = ::open(fn, O_RDONLY);
   if (fd < 0) {
-    derr << "_set_replay_guard " << cid << " error " << fd << dendl;
+    int err = errno;
+    derr << "_close_replay_guard " << cid << " error " << cpp_strerror(err) << dendl;
     assert(0 == "_close_replay_guard failed");
   }
   _close_replay_guard(fd, spos);
@@ -4451,13 +4453,12 @@ bool FileStore::collection_empty(coll_t c)
 int FileStore::collection_list_range(coll_t c, hobject_t start, hobject_t end,
                                      snapid_t seq, vector<hobject_t> *ls)
 {
-  int r = 0;
   bool done = false;
   hobject_t next = start;
 
   while (!done) {
     vector<hobject_t> next_objects;
-    r = collection_list_partial(c, next,
+    int r = collection_list_partial(c, next,
                                 get_ideal_list_min(), get_ideal_list_max(),
                                 seq, &next_objects, &next);
     if (r < 0)

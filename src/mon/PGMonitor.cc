@@ -128,6 +128,14 @@ void PGMonitor::tick()
     }
   }
 
+  if (!pg_map.pg_sum_deltas.empty()) {
+    utime_t age = ceph_clock_now(g_ceph_context) - pg_map.stamp;
+    if (age > 2 * g_conf->mon_delta_reset_interval) {
+      dout(10) << " clearing pg_map delta (" << age << " > " << g_conf->mon_delta_reset_interval << " seconds old)" << dendl;
+      pg_map.clear_delta();
+    }
+  }
+
   dout(10) << pg_map << dendl;
 }
 
@@ -1054,9 +1062,9 @@ void PGMonitor::dump_fs_stats(stringstream &ss, Formatter *f, bool verbose)
     if (verbose) {
       tbl.define_column("OBJECTS", TextTable::LEFT, TextTable::LEFT);
     }
-    tbl << stringify(si_t(pg_map.osd_sum.kb))
-        << stringify(si_t(pg_map.osd_sum.kb_avail))
-        << stringify(si_t(pg_map.osd_sum.kb_used));
+    tbl << stringify(si_t(pg_map.osd_sum.kb*1024))
+        << stringify(si_t(pg_map.osd_sum.kb_avail*1024))
+        << stringify(si_t(pg_map.osd_sum.kb_used*1024));
     tbl << percentify(((float)pg_map.osd_sum.kb_used / pg_map.osd_sum.kb)*100);
     if (verbose) {
       tbl << stringify(si_t(pg_map.pg_sum.stats.sum.num_objects));

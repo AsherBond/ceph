@@ -164,7 +164,7 @@ int main(int argc, char **argv) {
   }
 
   global_init(
-    &def_args, ceph_options, CEPH_ENTITY_TYPE_OSD,
+    &def_args, ceph_options, CEPH_ENTITY_TYPE_MON,
     CODE_ENVIRONMENT_UTILITY, 0);
   common_init_finish(g_ceph_context);
   g_ceph_context->_conf->apply_changes(NULL);
@@ -195,7 +195,37 @@ int main(int argc, char **argv) {
       goto done;
     }
   }
-  if (cmd == "getosdmap") {
+  if (cmd == "dump-keys") {
+    KeyValueDB::WholeSpaceIterator iter = st.get_iterator();
+    while (iter->valid()) {
+      pair<string,string> key(iter->raw_key());
+      cout << key.first << " / " << key.second << std::endl;
+      iter->next();
+    }
+  } else if (cmd == "compact") {
+    st.compact();
+  } else if (cmd == "getmonmap") {
+    if (!store_path.size()) {
+      std::cerr << "need mon store path" << std::endl;
+      std::cerr << desc << std::endl;
+      goto done;
+    }
+    version_t v;
+    if (version <= 0) {
+      v = st.get("monmap", "last_committed");
+    } else {
+      v = version;
+    }
+
+    bufferlist bl;
+    /// XXX: this is not ok, osdmap and full should be abstracted somewhere
+    int r = st.get("monmap", v, bl);
+    if (r < 0) {
+      std::cerr << "Error getting map: " << cpp_strerror(r) << std::endl;
+      goto done;
+    }
+    bl.write_fd(fd);
+  } else if (cmd == "getosdmap") {
     if (!store_path.size()) {
       std::cerr << "need mon store path" << std::endl;
       std::cerr << desc << std::endl;
@@ -257,8 +287,7 @@ int main(int argc, char **argv) {
       while (true) {
 	if (!iter.valid())
 	  break;
-	if (num % 20 == 0)
-	  std::cerr << "Replaying trans num " << num << std::endl;
+	std::cerr << "Replaying trans num " << num << std::endl;
 	st.apply_transaction(iter.cur());
 	iter.next();
 	++num;

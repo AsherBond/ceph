@@ -1815,6 +1815,7 @@ int KvFlatBtreeAsync::set_many(const map<string, bufferlist> &in_map) {
   io_ctx.aio_exec(index_name, aioc,  "kvs", "read_many", inbl, &outbl);
   aioc->wait_for_safe();
   err = aioc->get_return_value();
+  aioc->release();
   if (err < 0) {
     cerr << "getting index failed with " << err << std::endl;
     return err;
@@ -2168,6 +2169,7 @@ string KvFlatBtreeAsync::str() {
   io_ctx.aio_operate(index_name, top_aioc, &oro, NULL);
   top_aioc->wait_for_safe();
   err = top_aioc->get_return_value();
+  top_aioc->release();
   if (err < 0 && err != -5){
     if (verbose) cout << "getting keys failed with error " << err << std::endl;
     return ret.str();

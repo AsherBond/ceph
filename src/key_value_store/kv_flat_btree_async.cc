@@ -669,11 +669,13 @@ int KvFlatBtreeAsync::read_object(const string &obj, object_data * odata) {
   err = obj_aioc->get_return_value();
   if (err < 0){
     //possibly -ENOENT, meaning someone else deleted it.
+    obj_aioc->release();
     return err;
   }
   odata->unwritable = string(unw_bl.c_str(), unw_bl.length()) == "1";
   odata->version = obj_aioc->get_version();
   odata->size = odata->omap.size();
+  obj_aioc->release();
   return 0;
 }
 
@@ -690,12 +692,14 @@ int KvFlatBtreeAsync::read_object(const string &obj, rebalance_args * args) {
     if (verbose) cout << "\t\t" << client_name
 	<< "-read_object: reading failed with "
 	<< err << std::endl;
+    a->release();
     return err;
   }
   bufferlist::iterator it = outbl.begin();
   args->decode(it);
   args->odata.name = obj;
   args->odata.version = a->get_version();
+  a->release();
   return err;
 }
 
@@ -2065,6 +2069,7 @@ bool KvFlatBtreeAsync::is_consistent() {
 	  err = aioc->get_return_value();
 	  if (ceph_clock_now(g_ceph_context) - idata.ts > timeout) {
 	    if (err < 0) {
+	      aioc->release();
 	      if (err == -ENOENT) {
 		continue;
 	      } else {
@@ -2083,6 +2088,7 @@ bool KvFlatBtreeAsync::is_consistent() {
 	    }
 	  }
 	  special_names.insert(dit->obj);
+	  aioc->release();
 	}
 	for(vector<create_data >::iterator cit = idata.to_create.begin();
 	    cit != idata.to_create.end(); ++cit) {

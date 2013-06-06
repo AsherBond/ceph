@@ -357,7 +357,10 @@ librados_SOURCES = \
 	librados/RadosClient.cc \
 	librados/IoCtxImpl.cc \
 	osdc/Objecter.cc \
-	osdc/Striper.cc
+	osdc/Striper.cc \
+	cls/lock/cls_lock_client.cc \
+	cls/lock/cls_lock_types.cc \
+	cls/lock/cls_lock_ops.cc
 librados_la_SOURCES = ${librados_SOURCES}
 librados_la_CFLAGS = ${CRYPTO_CFLAGS} ${AM_CFLAGS}
 librados_la_CXXFLAGS = ${AM_CXXFLAGS}
@@ -741,6 +744,10 @@ unittest_pglog_CXXFLAGS = ${AM_CXXFLAGS} ${UNITTEST_CXXFLAGS}
 unittest_pglog_LDADD =  libosd.a $(LIBOS_LDA) $(LIBGLOBAL_LDA) ${UNITTEST_LDADD} 
 check_PROGRAMS += unittest_pglog
 
+if LINUX
+unittest_pglog_LDADD += -ldl
+endif
+
 unittest_gather_SOURCES = test/gather.cc
 unittest_gather_LDADD = ${LIBGLOBAL_LDA} ${UNITTEST_LDADD}
 unittest_gather_CXXFLAGS = ${AM_CXXFLAGS} ${UNITTEST_CXXFLAGS}
@@ -1016,6 +1023,12 @@ ceph_test_rados_api_misc_LDFLAGS = ${AM_LDFLAGS}
 ceph_test_rados_api_misc_LDADD =  librados.la ${UNITTEST_STATIC_LDADD}
 ceph_test_rados_api_misc_CXXFLAGS = ${AM_CXXFLAGS} ${UNITTEST_CXXFLAGS}
 bin_DEBUGPROGRAMS += ceph_test_rados_api_misc
+
+ceph_test_rados_api_lock_SOURCES = test/librados/lock.cc test/librados/test.cc
+ceph_test_rados_api_lock_LDFLAGS = ${AM_LDFLAGS}
+ceph_test_rados_api_lock_LDADD =  librados.la ${UNITTEST_STATIC_LDADD}
+ceph_test_rados_api_lock_CXXFLAGS = ${AM_CXXFLAGS} ${UNITTEST_CXXFLAGS}
+bin_DEBUGPROGRAMS += ceph_test_rados_api_lock
 
 ceph_test_libcephfs_SOURCES = test/libcephfs/test.cc test/libcephfs/readdir_r_cb.cc test/libcephfs/caps.cc
 ceph_test_libcephfs_LDFLAGS = $(PTHREAD_CFLAGS) ${AM_LDFLAGS}

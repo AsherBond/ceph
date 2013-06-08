@@ -39,7 +39,7 @@ ceph_sbin_SCRIPTS = \
 sbin_SCRIPTS = \
 	mount.fuse.ceph
 
-bin_SCRIPTS = ceph-run $(srcdir)/ceph-clsinfo ceph-debugpack ceph-rbdnamer
+bin_SCRIPTS = ceph ceph-run $(srcdir)/ceph-clsinfo ceph-debugpack ceph-rbdnamer
 dist_bin_SCRIPTS =
 # C/C++ tests to build will be appended to this
 check_PROGRAMS =
@@ -107,12 +107,6 @@ bin_PROGRAMS += ceph-mds
 ceph_mds_CXXFLAGS = ${AM_CXXFLAGS}
 
 # admin tools
-ceph_SOURCES = \
-	tools/ceph.cc \
-	tools/common.cc \
-	mon/PGMap.cc
-ceph_LDADD = $(LIBGLOBAL_LDA) $(LIBEDIT_LIBS)
-ceph_CXXFLAGS = ${AM_CXXFLAGS}
 
 ceph_conf_SOURCES = ceph_conf.cc
 ceph_conf_LDADD = $(LIBGLOBAL_LDA)
@@ -126,7 +120,7 @@ ceph_filestore_dump_LDADD = libosd.a $(LIBOS_LDA) $(LIBGLOBAL_LDA) -lboost_progr
 if LINUX
 ceph_filestore_dump_LDADD += -ldl
 endif
-bin_PROGRAMS += ceph ceph-conf ceph-authtool ceph_filestore_dump
+bin_PROGRAMS += ceph-conf ceph-authtool ceph_filestore_dump
 
 ceph_osdomap_tool_SOURCES = tools/ceph-osdomap-tool.cc \
 			  os/LevelDBStore.cc
@@ -181,7 +175,7 @@ ceph_syn_LDADD = libclient.la $(LIBGLOBAL_LDA)
 bin_PROGRAMS += ceph-syn
 
 base: ceph-mon ceph-osd ceph-mds \
-	ceph cephfs \
+	cephfs \
 	ceph-syn \
 	rados radosgw librados-config \
 	ceph-conf monmaptool osdmaptool crushtool ceph-authtool \
@@ -893,6 +887,12 @@ unittest_osd_osdcap_LDADD =  ${UNITTEST_LDADD} ${LIBGLOBAL_LDA}
 unittest_osd_osdcap_CXXFLAGS = ${CRYPTO_CFLAGS} ${AM_CXXFLAGS} ${UNITTEST_CXXFLAGS}
 check_PROGRAMS += unittest_osd_osdcap
 
+unittest_mon_moncap_SOURCES = test/mon/moncap.cc mon/MonCap.cc
+unittest_mon_moncap_LDFLAGS = $(PTHREAD_CFLAGS) ${AM_LDFLAGS}
+unittest_mon_moncap_LDADD =  ${UNITTEST_LDADD} ${LIBGLOBAL_LDA}
+unittest_mon_moncap_CXXFLAGS = ${CRYPTO_CFLAGS} ${AM_CXXFLAGS} ${UNITTEST_CXXFLAGS}
+check_PROGRAMS += unittest_mon_moncap
+
 #if WITH_RADOSGW
 #unittest_librgw_SOURCES = test/librgw.cc
 #unittest_librgw_LDFLAGS = -lrt $(PTHREAD_CFLAGS) -lcurl ${AM_LDFLAGS}
@@ -969,6 +969,12 @@ ceph_test_mon_workloadgen_SOURCES = \
 ceph_test_mon_workloadgen_LDADD = $(LIBOS_LDA) $(LIBGLOBAL_LDA)
 ceph_test_mon_workloadgen_CXXFLAGS = ${CRYPTO_CXXFLAGS} ${AM_CXXFLAGS}
 bin_DEBUGPROGRAMS += ceph_test_mon_workloadgen
+
+ceph_test_rados_api_cmd_SOURCES = test/librados/cmd.cc test/librados/test.cc
+ceph_test_rados_api_cmd_LDFLAGS = ${AM_LDFLAGS}
+ceph_test_rados_api_cmd_LDADD =  librados.la ${UNITTEST_STATIC_LDADD}
+ceph_test_rados_api_cmd_CXXFLAGS = ${AM_CXXFLAGS} ${UNITTEST_CXXFLAGS}
+bin_DEBUGPROGRAMS += ceph_test_rados_api_cmd
 
 ceph_test_rados_api_io_SOURCES = test/librados/io.cc test/librados/test.cc
 ceph_test_rados_api_io_LDFLAGS = ${AM_LDFLAGS}
@@ -1234,6 +1240,7 @@ EXTRA_DIST += \
 	$(srcdir)/upstart/radosgw.conf \
 	$(srcdir)/upstart/radosgw-all.conf \
 	$(srcdir)/upstart/radosgw-all-starter.conf \
+	ceph.in \
 	ceph-disk \
 	ceph-disk-prepare \
 	ceph-disk-activate \
@@ -1298,6 +1305,21 @@ ceph_ver.c: ./ceph_ver.h
 common/version.cc: ./ceph_ver.h
 test/encoding/ceph_dencoder.cc: ./ceph_ver.h
 
+# assemble Python script with global version variables
+# NB: depends on format of ceph_ver.h
+
+ceph: ceph.in ./ceph_ver.h Makefile
+	rm -f $@ $@.tmp
+	echo "#!/usr/bin/python" >$@.tmp
+	grep "#define CEPH_GIT_NICE_VER" ./ceph_ver.h | \
+		sed -e 's/#define \(.*VER\) /\1=/' >>$@.tmp
+	grep "#define CEPH_GIT_VER" ./ceph_ver.h | \
+	  sed -e 's/#define \(.*VER\) /\1=/' -e 's/=\(.*\)$$/="\1"/' >>$@.tmp
+	cat $@.in >>$@.tmp
+	chmod a+x $@.tmp
+	chmod a-w $@.tmp
+	mv $@.tmp $@
+
 # cleaning
 clean-local:
 	-rm *.so *.gcno *.gcda
@@ -1355,6 +1377,7 @@ libcommon_files = \
 	common/OutputDataSocket.cc \
 	common/admin_socket.cc \
 	common/admin_socket_client.cc \
+	common/cmdparse.cc \
 	common/escape.c \
 	common/Clock.cc \
 	common/Throttle.cc \
@@ -1379,7 +1402,7 @@ libcommon_files = \
 	json_spirit/json_spirit_value.cpp \
 	log/Log.cc \
 	log/SubsystemMap.cc \
-	mon/MonCaps.cc \
+	mon/MonCap.cc \
 	mon/MonClient.cc \
 	mon/MonMap.cc \
 	msg/Accepter.cc \
@@ -1962,8 +1985,9 @@ noinst_HEADERS = \
         mon/HealthService.h\
         mon/MDSMonitor.h\
 	mon/MonmapMonitor.h\
-        mon/MonCaps.h\
+        mon/MonCap.h\
         mon/MonClient.h\
+	mon/MonCommands.h\
         mon/MonMap.h\
         mon/Monitor.h\
 	mon/MonitorStore.h\
@@ -2106,7 +2130,8 @@ noinst_HEADERS = \
 	os/ObjectMap.h \
 	os/DBObjectMap.h \
 	os/KeyValueDB.h \
-	os/LevelDBStore.h
+	os/LevelDBStore.h \
+	common/cmdparse.h
 
 if ENABLE_COVERAGE
 COV_DIR = $(DESTDIR)$(libdir)/ceph/coverage

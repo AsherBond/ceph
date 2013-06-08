@@ -315,7 +315,7 @@ void PG::merge_log(ObjectStore::Transaction& t, pg_info_t &oinfo, pg_log_t &olog
   pg_log.merge_log(t, oinfo, olog, from, info, to_remove, dirty_log, dirty_info, dirty_big_info);
   for(list<hobject_t>::iterator i = to_remove.begin();
       i != to_remove.end();
-      i++)
+      ++i)
     remove_snap_mapped_object(t, *i);
 }
 
@@ -325,7 +325,7 @@ void PG::rewind_divergent_log(ObjectStore::Transaction& t, eversion_t newhead)
   pg_log.rewind_divergent_log(t, newhead, info, to_remove, dirty_log, dirty_info, dirty_big_info);
   for(list<hobject_t>::iterator i = to_remove.begin();
       i != to_remove.end();
-      i++)
+      ++i)
     remove_snap_mapped_object(t, *i);
 }
 
@@ -3146,10 +3146,7 @@ int PG::build_scrub_map_chunk(
 
   // pg attrs
   osd->store->collection_getattrs(coll, map.attrs);
-
-  // log
-  osd->store->read(coll_t(), log_oid, 0, 0, map.logbl);
-  dout(10) << " done.  pg log is " << map.logbl.length() << " bytes" << dendl;
+  dout(10) << __func__ << " done." << dendl;
 
   return 0;
 }
@@ -3190,9 +3187,7 @@ void PG::build_scrub_map(ScrubMap &map, ThreadPool::TPHandle &handle)
   // pg attrs
   osd->store->collection_getattrs(coll, map.attrs);
 
-  // log
-  osd->store->read(coll_t(), log_oid, 0, 0, map.logbl);
-  dout(10) << " done.  pg log is " << map.logbl.length() << " bytes" << dendl;
+  dout(10) << __func__ << " done." << dendl;
 }
 
 
@@ -3229,9 +3224,6 @@ void PG::build_inc_scrub_map(
   _scan_list(map, ls, false, handle);
   // pg attrs
   osd->store->collection_getattrs(coll, map.attrs);
-
-  // log
-  osd->store->read(coll_t(), log_oid, 0, 0, map.logbl);
 }
 
 void PG::repair_object(const hobject_t& soid, ScrubMap::object *po, int bad_peer, int ok_peer)

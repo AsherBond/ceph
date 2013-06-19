@@ -23,7 +23,8 @@ OPTION(num_client, OPT_INT, 1)
 OPTION(monmap, OPT_STR, "")
 OPTION(mon_host, OPT_STR, "")
 OPTION(lockdep, OPT_BOOL, false)
-OPTION(admin_socket, OPT_STR, "/var/run/ceph/$cluster-$name.asok") // default changed by common_preinit()
+OPTION(run_dir, OPT_STR, "/var/run/ceph")       // the "/var/run/ceph" dir, created on daemon startup
+OPTION(admin_socket, OPT_STR, "$run_dir/$cluster-$name.asok") // default changed by common_preinit()
 
 OPTION(daemonize, OPT_BOOL, false) // default changed by common_preinit()
 OPTION(pid_file, OPT_STR, "") // default changed by common_preinit()
@@ -203,11 +204,11 @@ OPTION(paxos_stash_full_interval, OPT_INT, 25)   // how often (in commits) to st
 OPTION(paxos_max_join_drift, OPT_INT, 10) // max paxos iterations before we must first sync the monitor stores
 OPTION(paxos_propose_interval, OPT_DOUBLE, 1.0)  // gather updates for this long before proposing a map update
 OPTION(paxos_min_wait, OPT_DOUBLE, 0.05)  // min time to gather updates for after period of inactivity
-OPTION(paxos_trim_min, OPT_INT, 500)  // number of extra proposals tolerated before trimming
-OPTION(paxos_trim_max, OPT_INT, 1000) // max number of extra proposals to trim at a time
+OPTION(paxos_trim_min, OPT_INT, 250)  // number of extra proposals tolerated before trimming
+OPTION(paxos_trim_max, OPT_INT, 500) // max number of extra proposals to trim at a time
 OPTION(paxos_trim_disabled_max_versions, OPT_INT, 100) // maximum amount of versions we shall allow passing by without trimming
-OPTION(paxos_service_trim_min, OPT_INT, 500) // minimum amount of versions to trigger a trim (0 disables it)
-OPTION(paxos_service_trim_max, OPT_INT, 1000) // maximum amount of versions to trim during a single proposal (0 disables it)
+OPTION(paxos_service_trim_min, OPT_INT, 250) // minimum amount of versions to trigger a trim (0 disables it)
+OPTION(paxos_service_trim_max, OPT_INT, 500) // maximum amount of versions to trim during a single proposal (0 disables it)
 OPTION(clock_offset, OPT_DOUBLE, 0) // how much to offset the system clock in Clock.cc
 OPTION(auth_cluster_required, OPT_STR, "cephx")   // required of mon, mds, osd daemons
 OPTION(auth_service_required, OPT_STR, "cephx")   // required by daemons of clients
@@ -351,6 +352,9 @@ OPTION(mds_standby_for_name, OPT_STR, "")
 OPTION(mds_standby_for_rank, OPT_INT, -1)
 OPTION(mds_standby_replay, OPT_BOOL, false)
 
+// If true, compact leveldb store on mount
+OPTION(osd_compact_leveldb_on_mount, OPT_BOOL, false)
+
 // If true, uses tmap as initial value for omap on old objects
 OPTION(osd_auto_upgrade_tmap, OPT_BOOL, true)
 
@@ -483,6 +487,8 @@ OPTION(osd_recovery_op_priority, OPT_INT, 10)
 
 // Max time to wait between notifying mon of shutdown and shutting down
 OPTION(osd_mon_shutdown_timeout, OPT_DOUBLE, 5)
+
+OPTION(osd_max_object_size, OPT_U64, 100*1024L*1024L*1024L) // OSD's maximum object size
 
 OPTION(filestore, OPT_BOOL, false)
 

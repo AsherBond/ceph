@@ -139,11 +139,12 @@ int MonClient::get_monmap_privately()
 
     if (monmap.fsid.is_zero()) {
       messenger->mark_down(cur_con);  // nope, clean that connection up
-      cur_con->put();
     }
   }
 
   if (temp_msgr) {
+    messenger->mark_down(cur_con);
+    cur_con.reset(NULL);
     monc_lock.Unlock();
     messenger->shutdown();
     if (smessenger)
@@ -156,10 +157,7 @@ int MonClient::get_monmap_privately()
   hunting = true;  // reset this to true!
   cur_mon.clear();
 
-  if (cur_con) {
-    cur_con->put();
-    cur_con = NULL;
-  }
+  cur_con.reset(NULL);
 
   if (!monmap.fsid.is_zero())
     return 0;
@@ -320,15 +318,23 @@ int MonClient::init()
 
 void MonClient::shutdown()
 {
+  monc_lock.Lock();
+  while (!version_requests.empty()) {
+    version_requests.begin()->second->context->complete(-ECANCELED);
+    delete version_requests.begin()->second;
+    version_requests.erase(version_requests.begin());
+  }
+
+  monc_lock.Unlock();
+
   if (initialized) {
     finisher.stop();
   }
   monc_lock.Lock();
   timer.shutdown();
-  if (cur_con) {
-    cur_con->put();
-    cur_con = NULL;
-  }
+
+  messenger->mark_down(cur_con);
+  cur_con.reset(NULL);
 
   monc_lock.Unlock();
 }
@@ -479,30 +485,27 @@ string MonClient::_pick_random_mon()
   }
 }
 
-void MonClient::_pick_new_mon()
+void MonClient::_reopen_session(int rank, string name)
 {
   assert(monc_lock.is_locked());
+  ldout(cct, 10) << "_reopen_session rank " << rank << " name " << name << dendl;
 
-  cur_mon = _pick_random_mon();
+  if (rank < 0 && name.length() == 0) {
+    cur_mon = _pick_random_mon();
+  } else if (name.length()) {
+    cur_mon = name;
+  } else {
+    cur_mon = monmap.get_name(rank);
+  }
 
   if (cur_con) {
     messenger->mark_down(cur_con);
-    cur_con->put();
   }
   cur_con = messenger->get_connection(monmap.get_inst(cur_mon));
 	
-  ldout(cct, 10) << "_pick_new_mon picked mon." << cur_mon << " con " << cur_con
+  ldout(cct, 10) << "picked mon." << cur_mon << " con " << cur_con
 		 << " addr " << cur_con->get_peer_addr()
 		 << dendl;
-}
-
-
-void MonClient::_reopen_session()
-{
-  assert(monc_lock.is_locked());
-  ldout(cct, 10) << "_reopen_session" << dendl;
-
-  _pick_new_mon();
 
   // throw out old queued messages
   while (!waiting_for_session.empty()) {
@@ -583,7 +586,7 @@ void MonClient::tick()
     if (now > sub_renew_after)
       _renew_subs();
 
-    messenger->send_keepalive(cur_con);
+    messenger->send_keepalive(cur_con.get());
    
     if (state == MC_STATE_HAVE_SESSION) {
       send_log();
@@ -724,6 +727,37 @@ int MonClient::wait_auth_rotating(double timeout)
 void MonClient::_send_command(MonCommand *r)
 {
   version_t last_seen_version = 0;
+
+  if (r->target_rank >= 0 &&
+      r->target_rank != monmap.get_rank(cur_mon)) {
+    ldout(cct, 10) << "_send_command " << r->tid << " " << r->cmd
+		   << " wants rank " << r->target_rank
+		   << ", reopening session"
+		   << dendl;
+    if (r->target_rank >= (int)monmap.size()) {
+      ldout(cct, 10) << " target " << r->target_rank << " >= max mon " << monmap.size() << dendl;
+      _finish_command(r, -ENOENT, "mon rank dne");
+      return;
+    }
+    _reopen_session(r->target_rank, string());
+    return;
+  }
+
+  if (r->target_name.length() &&
+      r->target_name != cur_mon) {
+    ldout(cct, 10) << "_send_command " << r->tid << " " << r->cmd
+		   << " wants mon " << r->target_name
+		   << ", reopening session"
+		   << dendl;
+    if (!monmap.contains(r->target_name)) {
+      ldout(cct, 10) << " target " << r->target_name << " not present in monmap" << dendl;
+      _finish_command(r, -ENOENT, "mon dne");
+      return;
+    }
+    _reopen_session(-1, r->target_name);
+    return;
+  }
+
   ldout(cct, 10) << "_send_command " << r->tid << " " << r->cmd << dendl;
   MMonCommand *m = new MMonCommand(monmap.fsid, last_seen_version);
   m->set_tid(r->tid);
@@ -795,6 +829,43 @@ int MonClient::start_mon_command(const vector<string>& cmd, bufferlist& inbl,
   mon_commands[r->tid] = r;
   _send_command(r);
   // can't fail
+  return 0;
+}
+
+int MonClient::start_mon_command(string name,
+				 const vector<string>& cmd, bufferlist& inbl,
+				 bufferlist *outbl, string *outs,
+				 Context *onfinish)
+{
+  Mutex::Locker l(monc_lock);
+  MonCommand *r = new MonCommand(++last_mon_command_tid);
+  r->target_name = name;
+  r->cmd = cmd;
+  r->inbl = inbl;
+  r->poutbl = outbl;
+  r->prs = outs;
+  r->onfinish = onfinish;
+  mon_commands[r->tid] = r;
+  _send_command(r);
+  // can't fail
+  return 0;
+}
+
+int MonClient::start_mon_command(int rank,
+				 const vector<string>& cmd, bufferlist& inbl,
+				 bufferlist *outbl, string *outs,
+				 Context *onfinish)
+{
+  Mutex::Locker l(monc_lock);
+  MonCommand *r = new MonCommand(++last_mon_command_tid);
+  r->target_rank = rank;
+  r->cmd = cmd;
+  r->inbl = inbl;
+  r->poutbl = outbl;
+  r->prs = outs;
+  r->onfinish = onfinish;
+  mon_commands[r->tid] = r;
+  _send_command(r);
   return 0;
 }
 

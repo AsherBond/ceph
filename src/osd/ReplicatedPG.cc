@@ -1953,6 +1953,16 @@ int ReplicatedPG::do_tmapup(OpContext *ctx, bufferlist::iterator& bp, OSDOp& osd
   return result;
 }
 
+static int check_offset_and_length(uint64_t offset, uint64_t length)
+{
+  if (offset >= g_conf->osd_max_object_size ||
+      length > g_conf->osd_max_object_size ||
+      offset + length > g_conf->osd_max_object_size)
+    return -EFBIG;
+
+  return 0;
+}
+
 int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 {
   int result = 0;
@@ -2005,7 +2015,14 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
     // munge ZERO -> TRUNCATE?  (don't munge to DELETE or we risk hosing attributes)
     if (op.op == CEPH_OSD_OP_ZERO &&
 	obs.exists &&
+	op.extent.offset < g_conf->osd_max_object_size &&
+	op.extent.length >= 1 &&
+	op.extent.length <= g_conf->osd_max_object_size &&
 	op.extent.offset + op.extent.length >= oi.size) {
+      if (op.extent.offset >= oi.size) {
+        // no-op
+	goto fail;
+      }
       dout(10) << " munging ZERO " << op.extent.offset << "~" << op.extent.length
 	       << " -> TRUNCATE " << op.extent.offset << " (old size is " << oi.size << ")" << dendl;
       op.op = CEPH_OSD_OP_TRUNCATE;
@@ -2517,6 +2534,9 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	    oi.truncate_size = op.extent.truncate_size;
 	  }
 	}
+	result = check_offset_and_length(op.extent.offset, op.extent.length);
+	if (result < 0)
+	  break;
 	bufferlist nbl;
 	bp.copy(op.extent.length, nbl);
 	t.write(coll, soid, op.extent.offset, op.extent.length, nbl);
@@ -2531,6 +2551,9 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
       
     case CEPH_OSD_OP_WRITEFULL:
       { // write full object
+	result = check_offset_and_length(op.extent.offset, op.extent.length);
+	if (result < 0)
+	  break;
 	bufferlist nbl;
 	bp.copy(op.extent.length, nbl);
 	if (obs.exists) {
@@ -2560,6 +2583,9 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 
     case CEPH_OSD_OP_ZERO:
       { // zero
+	result = check_offset_and_length(op.extent.offset, op.extent.length);
+	if (result < 0)
+	  break;
 	assert(op.extent.length);
 	if (obs.exists) {
 	  t.zero(coll, soid, op.extent.offset, op.extent.length);
@@ -2615,6 +2641,11 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	// truncate
 	if (!obs.exists) {
 	  dout(10) << " object dne, truncate is a no-op" << dendl;
+	  break;
+	}
+
+	if (op.extent.offset > g_conf->osd_max_object_size) {
+	  result = -EFBIG;
 	  break;
 	}
 
@@ -3498,6 +3529,7 @@ void ReplicatedPG::do_osd_op_effects(OpContext *ctx)
   ConnectionRef conn(ctx->op->request->get_connection());
   boost::intrusive_ptr<OSD::Session> session(
     (OSD::Session *)conn->get_priv());
+  session->put();  // get_priv() takes a ref, and so does the intrusive_ptr
   entity_name_t entity = ctx->reqid.name;
 
   dout(15) << "do_osd_op_effects on session " << session.get() << dendl;
@@ -4836,7 +4868,9 @@ void ReplicatedPG::sub_op_modify(OpRequestRef op)
   } else {
     // just trim the log
     if (m->pg_trim_to != eversion_t()) {
-      pg_log.trim(rm->localt, m->pg_trim_to, info, log_oid);
+      pg_log.trim(m->pg_trim_to, info);
+      dirty_info = true;
+      write_if_dirty(rm->localt);
       rm->tls.push_back(&rm->localt);
     }
   }

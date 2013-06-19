@@ -207,23 +207,23 @@ int FileStore::lfn_open(coll_t cid,
   int flags = O_RDWR;
   if (create)
     flags |= O_CREAT;
+  Index index2;
+  if (!index) {
+    index = &index2;
+  }
+  int r = 0;
+  if (!(*index)) {
+    r = get_index(cid, index);
+  }
   Mutex::Locker l(fdcache_lock);
   *outfd = fdcache.lookup(oid);
   if (*outfd) {
     return 0;
   }
-  Index index2;
   IndexedPath path2;
   if (!path)
     path = &path2;
   int fd, exist;
-  int r = 0;
-  if (!index) {
-    index = &index2;
-  }
-  if (!(*index)) {
-    r = get_index(cid, index);
-  }
   if (r < 0) {
     derr << "error getting collection index for " << cid
 	 << ": " << cpp_strerror(-r) << dendl;
@@ -1665,6 +1665,13 @@ int FileStore::mount()
       ret = -1;
       goto close_current_fd;
     }
+
+    if (g_conf->osd_compact_leveldb_on_mount) {
+      derr << "Compacting store..." << dendl;
+      omap_store->compact();
+      derr << "...finished compacting store" << dendl;
+    }
+
     DBObjectMap *dbomap = new DBObjectMap(omap_store);
     ret = dbomap->init(do_update);
     if (ret < 0) {
@@ -2593,6 +2600,16 @@ unsigned FileStore::_do_transaction(Transaction& t, uint64_t op_seq, int trans_n
 	set<string> keys;
 	i.get_keyset(keys);
 	r = _omap_rmkeys(cid, oid, keys, spos);
+      }
+      break;
+    case Transaction::OP_OMAP_RMKEYRANGE:
+      {
+	coll_t cid(i.get_cid());
+	hobject_t oid = i.get_oid();
+	string first, last;
+	first = i.get_key();
+	last = i.get_key();
+	r = _omap_rmkeyrange(cid, oid, first, last, spos);
       }
       break;
     case Transaction::OP_OMAP_SETHEADER:
@@ -4649,6 +4666,23 @@ int FileStore::_omap_rmkeys(coll_t cid, const hobject_t &hoid,
   if (r < 0 && r != -ENOENT)
     return r;
   return 0;
+}
+
+int FileStore::_omap_rmkeyrange(coll_t cid, const hobject_t &hoid,
+				const string& first, const string& last,
+				const SequencerPosition &spos) {
+  dout(15) << __func__ << " " << cid << "/" << hoid << " [" << first << "," << last << "]" << dendl;
+  set<string> keys;
+  {
+    ObjectMap::ObjectMapIterator iter = get_omap_iterator(cid, hoid);
+    if (!iter)
+      return -ENOENT;
+    for (iter->lower_bound(first); iter->valid() && iter->key() < last;
+	 iter->next()) {
+      keys.insert(iter->key());
+    }
+  }
+  return _omap_rmkeys(cid, hoid, keys, spos);
 }
 
 int FileStore::_omap_setheader(coll_t cid, const hobject_t &hoid,

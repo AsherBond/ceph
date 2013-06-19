@@ -100,13 +100,14 @@ To install ``ceph-deploy``, execute the following::
 
 	wget -q -O- 'https://ceph.com/git/?p=ceph.git;a=blob_plain;f=keys/release.asc' | sudo apt-key add -
 	echo deb http://ceph.com/debian-cuttlefish/ $(lsb_release -sc) main | sudo tee /etc/apt/sources.list.d/ceph.list
+	sudo apt-get update
 	sudo apt-get install ceph-deploy
 
 
 Ensure Connectivity
 ===================
 
-Ensure that your Admin node has connectivity to the network and to your Server
+Ensure that your admin node has connectivity to the network and to your Server
 node (e.g., ensure ``iptables``, ``ufw`` or other tools that may prevent
 connections, traffic forwarding, etc. to allow what you need).
 
@@ -116,15 +117,38 @@ connections, traffic forwarding, etc. to allow what you need).
 Once you have completed this pre-flight checklist, you are ready to begin using
 ``ceph-deploy``.
 
+
+Hostname Resolution
+===================
+
+Ensure that your admin node can resolve the server node's hostname. ::
+
+	ping {server-node}
+
+If you execute ``ceph-deploy`` against the localhost, ``ceph-deploy``
+must be able to resolve its IP address. Consider adding the IP address
+to your ``/etc/hosts`` file such that it resolves to the hostname. ::
+
+	hostname
+	host -4 {hostname}
+	sudo vim /etc/hosts
+
+	{ip-address} {hostname}
+
+	ceph-deploy {command} {hostname}
+
+.. tip:: The ``ceph-deploy`` tool will not resolve to ``localhost``. Use
+   the hostname.
+
 Summary
 =======
 
 Once you have passwordless ``ssh`` connectivity, passwordless ``sudo``,
 installed ``ceph-deploy``, and you have ensured appropriate connectivity,
-proceed to the `Object Store Quick Start`_.
+proceed to the `Storage Cluster Quick Start`_.
 
 .. tip:: The ``ceph-deploy`` utility can install Ceph packages on remote 
    machines from the admin node!
 
-.. _Object Store Quick Start: ../quick-ceph-deploy
+.. _Storage Cluster Quick Start: ../quick-ceph-deploy
 .. _OS Recommendations: ../../install/os-recommendations

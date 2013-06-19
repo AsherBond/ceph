@@ -776,7 +776,7 @@ void Client::update_dir_dist(Inode *in, DirStat *dst)
 void Client::insert_readdir_results(MetaRequest *request, MetaSession *session, Inode *diri) {
 
   MClientReply *reply = request->reply;
-  Connection *con = request->reply->get_connection();
+  ConnectionRef con = request->reply->get_connection();
   uint64_t features = con->get_features();
 
   assert(request->readdir_result.empty());
@@ -918,7 +918,7 @@ Inode* Client::insert_trace(MetaRequest *request, MetaSession *session)
     return NULL;
   }
 
-  Connection *con = request->reply->get_connection();
+  ConnectionRef con = request->reply->get_connection();
   uint64_t features = con->get_features();
   ldout(cct, 10) << " features 0x" << hex << features << dec << dendl;
 
@@ -1522,7 +1522,7 @@ void Client::handle_client_session(MClientSession *m)
   int from = m->get_source().num();
   ldout(cct, 10) << "handle_client_session " << *m << " from mds." << from << dendl;
 
-  MetaSession *session = _get_mds_session(from, m->get_connection());
+  MetaSession *session = _get_mds_session(from, m->get_connection().get());
   if (!session) {
     ldout(cct, 10) << " discarding session message from sessionless mds " << m->get_source_inst() << dendl;
     m->put();
@@ -1639,7 +1639,7 @@ MClientRequest* Client::build_client_request(MetaRequest *request)
 void Client::handle_client_request_forward(MClientRequestForward *fwd)
 {
   int mds = fwd->get_source().num();
-  MetaSession *session = _get_mds_session(mds, fwd->get_connection());
+  MetaSession *session = _get_mds_session(mds, fwd->get_connection().get());
   if (!session) {
     fwd->put();
     return;
@@ -1677,7 +1677,7 @@ void Client::handle_client_request_forward(MClientRequestForward *fwd)
 void Client::handle_client_reply(MClientReply *reply)
 {
   int mds_num = reply->get_source().num();
-  MetaSession *session = _get_mds_session(mds_num, reply->get_connection());
+  MetaSession *session = _get_mds_session(mds_num, reply->get_connection().get());
   if (!session) {
     reply->put();
     return;
@@ -1879,7 +1879,6 @@ void Client::handle_mds_map(MMDSMap* m)
 	mds_sessions.count(p->first)) {
       MetaSession *session = mds_sessions[p->first];
       session->inst = mdsmap->get_inst(p->first);
-      session->con->put();
       session->con = messenger->get_connection(session->inst);
       send_reconnect(session);
     }
@@ -2023,7 +2022,7 @@ void Client::handle_lease(MClientLease *m)
   assert(m->get_action() == CEPH_MDS_LEASE_REVOKE);
 
   int mds = m->get_source().num();
-  MetaSession *session = _get_mds_session(mds, m->get_connection());
+  MetaSession *session = _get_mds_session(mds, m->get_connection().get());
   if (!session) {
     m->put();
     return;
@@ -2414,7 +2413,7 @@ void Client::check_caps(Inode *in, bool is_delayed)
     }
 
     /* completed revocation? */
-    if (revoking && (revoking && used) == 0) {
+    if (revoking && (revoking & used) == 0) {
       ldout(cct, 10) << "completed revocation of " << ccap_string(cap->implemented & ~cap->issued) << dendl;
       goto ack;
     }
@@ -2851,7 +2850,7 @@ void Client::remove_cap(Cap *cap)
   ceph_mds_cap_item i;
   i.ino = in->ino;
   i.cap_id = cap->cap_id;
-  i.seq = cap->seq;
+  i.seq = cap->issue_seq;
   i.migrate_seq = cap->mseq;
   session->release->caps.push_back(i);
   
@@ -3218,7 +3217,7 @@ void Client::handle_snap(MClientSnap *m)
 {
   ldout(cct, 10) << "handle_snap " << *m << dendl;
   int mds = m->get_source().num();
-  MetaSession *session = _get_mds_session(mds, m->get_connection());
+  MetaSession *session = _get_mds_session(mds, m->get_connection().get());
   if (!session) {
     m->put();
     return;
@@ -3294,7 +3293,7 @@ void Client::handle_snap(MClientSnap *m)
 void Client::handle_caps(MClientCaps *m)
 {
   int mds = m->get_source().num();
-  MetaSession *session = _get_mds_session(mds, m->get_connection());
+  MetaSession *session = _get_mds_session(mds, m->get_connection().get());
   if (!session) {
     m->put();
     return;
@@ -5827,13 +5826,17 @@ int Client::_read_sync(Fh *f, uint64_t off, uint64_t len, bufferlist *bl)
     }
     // short read?
     if (r >= 0 && r < wanted) {
-      if (pos + left <= in->size) {
-	// hole, zero and return.
-	bufferptr z(left);
+      if (pos < in->size) {
+	// zero up to known EOF
+	int some = MIN(in->size - pos, left);
+	bufferptr z(some);
 	z.zero();
 	bl->push_back(z);
-	read += left;
-	return read;
+	read += some;
+	pos += some;
+	left -= some;
+	if (left == 0)
+	  return read;
       }
 
       // reverify size
@@ -7889,9 +7892,22 @@ void Client::ms_handle_remote_reset(Connection *con)
 	}
       }
       if (mds >= 0) {
-	if (s->state == MetaSession::STATE_CLOSING) {
+	switch (s->state) {
+	case MetaSession::STATE_CLOSING:
 	  ldout(cct, 1) << "reset from mds we were closing; we'll call that closed" << dendl;
 	  _closed_mds_session(s);
+	  break;
+
+	case MetaSession::STATE_OPENING:
+	  {
+	    ldout(cct, 1) << "reset from mds we were opening; retrying" << dendl;
+	    list<Cond*> waiters;
+	    waiters.swap(s->waiting_for_open);
+	    _closed_mds_session(s);
+	    MetaSession *news = _get_or_open_mds_session(mds);
+	    news->waiting_for_open.swap(waiters);
+	  }
+	  break;
 	}
       }
     }

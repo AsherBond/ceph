@@ -1,5 +1,9 @@
 #!/bin/sh
 
+export PYTHONPATH=./pybind
+export LD_LIBRARY_PATH=.libs
+
+
 # abort on failure
 set -e
 
@@ -151,9 +155,6 @@ fi
 
 ARGS="-c $conf"
 
-export PYTHONPATH=./pybind
-export LD_LIBRARY_PATH=.libs
-
 run() {
     type=$1
     shift
@@ -293,6 +294,7 @@ if [ "$start_mon" -eq 1 ]; then
         osd pgp bits = 5  ; (invalid, but ceph should cope!)
         osd crush chooseleaf type = 0
         osd pool default min size = 1
+        run dir = out
 EOF
 if [ "$cephx" -eq 1 ] ; then
 cat <<EOF >> $conf
@@ -421,7 +423,7 @@ EOF
 	    uuid=`uuidgen`
 	    echo "add osd$osd $uuid"
 	    $SUDO $CEPH_ADM osd create $uuid
-	    $SUDO $CEPH_ADM osd crush set $osd osd.$osd 1.0 host=localhost rack=localrack root=default
+	    $SUDO $CEPH_ADM osd crush set osd.$osd 1.0 host=localhost rack=localrack root=default
 	    $SUDO $CEPH_BIN/ceph-osd -i $osd $ARGS --mkfs --mkkey --osd-uuid $uuid
 
 	    key_fn=dev/osd$osd/keyring

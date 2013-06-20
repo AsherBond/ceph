@@ -90,6 +90,9 @@ using ceph::crypto::SHA1;
 # ifndef BTRFS_SUPER_MAGIC
 static const __SWORD_TYPE BTRFS_SUPER_MAGIC(0x9123683E);
 # endif
+# ifndef XFS_SUPER_MAGIC
+static const __SWORD_TYPE XFS_SUPER_MAGIC(0x58465342);
+# endif
 #endif
 
 #define COMMIT_SNAP_ITEM "snap_%lld"
@@ -321,11 +324,11 @@ int FileStore::lfn_link(coll_t c, coll_t cid, const hobject_t& o)
 int FileStore::lfn_unlink(coll_t cid, const hobject_t& o,
 			  const SequencerPosition &spos)
 {
-  Mutex::Locker l(fdcache_lock);
   Index index;
   int r = get_index(cid, &index);
   if (r < 0)
     return r;
+  Mutex::Locker l(fdcache_lock);
   {
     IndexedPath path;
     int exist;
@@ -466,10 +469,16 @@ FileStore::FileStore(const std::string &base, const std::string &jdev, const cha
   plb.add_u64_counter(l_os_j_full, "journal_full");
 
   logger = plb.create_perf_counters();
+
+  g_ceph_context->get_perfcounters_collection()->add(logger);
+  g_ceph_context->_conf->add_observer(this);
 }
 
 FileStore::~FileStore()
 {
+  g_ceph_context->_conf->remove_observer(this);
+  g_ceph_context->get_perfcounters_collection()->remove(logger);
+
   if (journal)
     journal->logger = NULL;
   delete logger;
@@ -1061,6 +1070,18 @@ int FileStore::_detect_fs()
     return -errno;
   }
   blk_size = st.f_bsize;
+
+#if defined(__linux__)
+  if (st.f_type == XFS_SUPER_MAGIC) {
+    dout(1) << "mount detected xfs" << dendl;
+    if (m_filestore_replica_fadvise) {
+      dout(1) << " disabling 'filestore replica fadvise' due to known issues with fadvise(DONTNEED) on xfs" << dendl;
+      g_conf->set_val("filestore_replica_fadvise", "false");
+      g_conf->apply_changes(NULL);
+      assert(m_filestore_replica_fadvise == false);
+    }
+  }
+#endif
 
 #if defined(__linux__)
   if (st.f_type == BTRFS_SUPER_MAGIC) {
@@ -1789,10 +1810,6 @@ int FileStore::mount()
 
   timer.init();
 
-  g_ceph_context->get_perfcounters_collection()->add(logger);
-
-  g_ceph_context->_conf->add_observer(this);
-
   // all okay.
   return 0;
 
@@ -1814,7 +1831,6 @@ int FileStore::umount()
 {
   dout(5) << "umount " << basedir << dendl;
   
-  g_ceph_context->_conf->remove_observer(this);
 
   start_sync();
 
@@ -1826,8 +1842,6 @@ int FileStore::umount()
   op_tp.stop();
 
   journal_stop();
-
-  g_ceph_context->get_perfcounters_collection()->remove(logger);
 
   op_finisher.stop();
   ondisk_finisher.stop();

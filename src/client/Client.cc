@@ -5828,7 +5828,9 @@ int Client::_read_sync(Fh *f, uint64_t off, uint64_t len, bufferlist *bl)
     if (r >= 0 && r < wanted) {
       if (pos < in->size) {
 	// zero up to known EOF
-	int some = MIN(in->size - pos, left);
+	int some = in->size - pos;
+	if (some > left)
+	  some = left;
 	bufferptr z(some);
 	z.zero();
 	bl->push_back(z);
@@ -7907,6 +7909,12 @@ void Client::ms_handle_remote_reset(Connection *con)
 	    MetaSession *news = _get_or_open_mds_session(mds);
 	    news->waiting_for_open.swap(waiters);
 	  }
+	  break;
+
+	case MetaSession::STATE_OPEN:
+	case MetaSession::STATE_NEW:
+	case MetaSession::STATE_CLOSED:
+	default:
 	  break;
 	}
       }

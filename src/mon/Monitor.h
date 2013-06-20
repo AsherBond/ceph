@@ -364,6 +364,7 @@ private:
     }
   };
 
+  void sync_obtain_latest_monmap(bufferlist &bl);
   void sync_store_init();
   void sync_store_cleanup();
   bool is_sync_on_going();
@@ -1413,6 +1414,7 @@ public:
   int preinit();
   int init();
   void init_paxos();
+  void refresh_from_paxos(bool *need_bootstrap);
   void shutdown();
   void tick();
 

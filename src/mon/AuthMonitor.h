@@ -112,8 +112,6 @@ private:
   uint64_t max_global_id;
   uint64_t last_allocated_id;
 
-  version_t format_version;
-
   void upgrade_format();
 
   void export_keyring(KeyRing& keyring);
@@ -148,12 +146,13 @@ private:
   bool preprocess_command(MMonCommand *m);
   bool prepare_command(MMonCommand *m);
 
-  void check_rotate();
+  bool check_rotate();
  public:
   AuthMonitor(Monitor *mn, Paxos *p, const string& service_name)
-    : PaxosService(mn, p, service_name), last_rotating_ver(0),
-      max_global_id(0), last_allocated_id(0),
-      format_version(0)
+    : PaxosService(mn, p, service_name),
+      last_rotating_ver(0),
+      max_global_id(0),
+      last_allocated_id(0)
   {}
 
   void pre_auth(MAuth *m);

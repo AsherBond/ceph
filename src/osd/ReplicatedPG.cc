@@ -2758,6 +2758,10 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
       
     case CEPH_OSD_OP_SETXATTR:
       {
+	if (op.xattr.value_len > g_conf->osd_max_attr_size) {
+	  result = -EFBIG;
+	  break;
+	}
 	if (!obs.exists) {
 	  t.touch(coll, soid);
 	  ctx->delta_stats.num_objects++;
@@ -4456,7 +4460,6 @@ ObjectContext *ReplicatedPG::get_object_context(const hobject_t& soid,
     if (can_create)
       ssc = get_snapset_context(soid.oid, soid.get_key(), soid.hash, true);
     obc = new ObjectContext(oi, true, ssc);
-    obc->obs.oi.decode(bv);
     obc->obs.exists = true;
 
     register_object_context(obc);

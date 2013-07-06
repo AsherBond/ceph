@@ -1025,7 +1025,7 @@ bin_DEBUGPROGRAMS += ceph_test_rados_api_cls
 
 ceph_test_rados_api_misc_SOURCES = test/librados/misc.cc test/librados/test.cc
 ceph_test_rados_api_misc_LDFLAGS = ${AM_LDFLAGS}
-ceph_test_rados_api_misc_LDADD =  librados.la ${UNITTEST_STATIC_LDADD}
+ceph_test_rados_api_misc_LDADD =  librados.la $(LIBGLOBAL_LDA) ${UNITTEST_STATIC_LDADD}
 ceph_test_rados_api_misc_CXXFLAGS = ${AM_CXXFLAGS} ${UNITTEST_CXXFLAGS}
 bin_DEBUGPROGRAMS += ceph_test_rados_api_misc
 
@@ -1219,6 +1219,7 @@ EXTRA_DIST += \
 	ceph-run $(srcdir)/ceph_common.sh \
 	$(srcdir)/init-radosgw \
 	$(srcdir)/init-radosgw.sysv \
+	$(srcdir)/init-rbdmap \
 	$(srcdir)/ceph-clsinfo $(srcdir)/make_version $(srcdir)/check_version \
 	$(srcdir)/.git_version \
 	$(srcdir)/ceph-rbdnamer \
@@ -1245,7 +1246,8 @@ EXTRA_DIST += \
 	ceph-disk-activate \
 	ceph-disk-udev \
 	ceph-create-keys \
-	mount.fuse.ceph
+	mount.fuse.ceph \
+	rbdmap
 
 
 EXTRA_DIST += $(srcdir)/$(shell_scripts:%=%.in)
@@ -1384,6 +1386,7 @@ libcommon_files = \
 	common/Finisher.cc \
 	common/environment.cc\
 	common/sctp_crc32.c\
+	common/crc32c-intel.c\
 	common/assert.cc \
         common/run_cmd.cc \
 	common/WorkQueue.cc \

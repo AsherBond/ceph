@@ -548,6 +548,7 @@ public:
    *
    *  - the client hasn't seen the future relative to this PaxosService
    *  - this service isn't proposing.
+   *  - we have committed our initial state (last_committed > 0)
    *
    * @param ver The version we want to check if is readable
    * @returns true if it is readable; false otherwise
@@ -555,7 +556,8 @@ public:
   bool is_readable(version_t ver = 0) {
     if (ver > get_last_committed() ||
 	is_proposing() ||
-	!paxos->is_readable(0))
+	!paxos->is_readable(0) ||
+	get_last_committed() == 0)
       return false;
     return true;
   }
@@ -627,7 +629,8 @@ public:
      * happens to be readable at that specific point in time.
      */
     if (is_proposing() ||
-	ver > get_last_committed())
+	ver > get_last_committed() ||
+	get_last_committed() == 0)
       wait_for_finished_proposal(c);
     else
       paxos->wait_for_readable(c);
@@ -661,21 +664,26 @@ public:
    */
   void trim(MonitorDBStore::Transaction *t, version_t from, version_t to);
   /**
-   * Trim our log. This implies getting rid of versions on the k/v store.
-   * Services implementing us don't have to implement this function if they
-   * don't want to, but we won't implement it for them either.
+   * Trim our log
    *
-   * This function had to be inheritted from the Paxos, since the existing
-   * services made use of it. This function should be tuned for each service's
-   * needs. We have it in this interface to make sure its usage and purpose is
-   * well understood by the underlying services.
+   * Will call encode_trim_extra(), allowing services to add
+   * additional bits to the trim transaction.
    *
    * @param first The version that should become the first one in the log.
    * @param force Optional. Each service may use it as it sees fit, but the
    *		  expected behavior is that, when 'true', we will remove all
    *		  the log versions even if we don't have a full map in store.
    */
-  virtual void encode_trim(MonitorDBStore::Transaction *t);
+  void encode_trim(MonitorDBStore::Transaction *t);
+
+  /**
+   * encode service-specific extra bits into trim transaction
+   *
+   * @param tx transaction
+   * @param first new first_committed value
+   */
+  virtual void encode_trim_extra(MonitorDBStore::Transaction *tx, version_t first) {}
+
   /**
    *
    */

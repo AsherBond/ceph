@@ -533,12 +533,17 @@ void OSDMonitor::share_map_with_random_osd()
   mon->messenger->send_message(m, s->inst);
 }
 
-void OSDMonitor::update_trim()
+version_t OSDMonitor::get_trim_to()
 {
   if (mon->pgmon()->is_readable() &&
       mon->pgmon()->pg_map.creating_pgs.empty()) {
     epoch_t floor = mon->pgmon()->pg_map.calc_min_last_epoch_clean();
     dout(10) << " min_last_epoch_clean " << floor << dendl;
+    if (g_conf->mon_osd_force_trim_to > 0 &&
+	g_conf->mon_osd_force_trim_to < (int)get_last_committed()) {
+      floor = g_conf->mon_osd_force_trim_to;
+      dout(10) << " explicit mon_osd_force_trim_to = " << floor << dendl;
+    }
     unsigned min = g_conf->mon_min_osdmap_epochs;
     if (floor + min > get_last_committed()) {
       if (min < get_last_committed())
@@ -547,9 +552,9 @@ void OSDMonitor::update_trim()
 	floor = 0;
     }
     if (floor > get_first_committed())
-      if (get_trim_to() < floor)
-	set_trim_to(floor);
+      return floor;
   }
+  return 0;
 }
 
 void OSDMonitor::encode_trim_extra(MonitorDBStore::Transaction *tx, version_t first)
@@ -558,12 +563,6 @@ void OSDMonitor::encode_trim_extra(MonitorDBStore::Transaction *tx, version_t fi
   bufferlist bl;
   get_version_full(first, bl);
   put_version_full(tx, first, bl);
-}
-
-bool OSDMonitor::service_should_trim()
-{
-  update_trim();
-  return (get_trim_to() > 0);
 }
 
 // -------------
@@ -1801,8 +1800,6 @@ void OSDMonitor::tick()
   if (update_pools_status())
     do_propose = true;
 
-  update_trim();
-
   if (do_propose ||
       !pending_inc.new_pg_temp.empty())  // also propose if we adjusted pg_temp
     propose_pending();
@@ -2059,23 +2056,30 @@ bool OSDMonitor::preprocess_command(MMonCommand *m)
     ds << "\n";
     rdata.append(ds);
   } else if (prefix == "osd map") {
-    string poolstr, objstr;
+    string poolstr, objstr, namespacestr;
     cmd_getval(g_ceph_context, cmdmap, "pool", poolstr);
     cmd_getval(g_ceph_context, cmdmap, "object", objstr);
+    cmd_getval(g_ceph_context, cmdmap, "nspace", namespacestr);
+
     int64_t pool = osdmap.lookup_pg_pool_name(poolstr.c_str());
     if (pool < 0) {
       ss << "pool " << poolstr << " does not exist";
       r = -ENOENT;
       goto reply;
     }
-    object_locator_t oloc(pool);
+    object_locator_t oloc(pool, namespacestr);
     object_t oid(objstr);
     pg_t pgid = osdmap.object_locator_to_pg(oid, oloc);
     pg_t mpgid = osdmap.raw_pg_to_pg(pgid);
     vector<int> up, acting;
     osdmap.pg_to_up_acting_osds(mpgid, up, acting);
+    string fullobjname;
+    if (!namespacestr.empty())
+      fullobjname = namespacestr + string("/") + oid.name;
+    else
+      fullobjname = oid.name;
     ds << "osdmap e" << osdmap.get_epoch()
-       << " pool '" << poolstr << "' (" << pool << ") object '" << oid << "' ->"
+       << " pool '" << poolstr << "' (" << pool << ") object '" << fullobjname << "' ->"
        << " pg " << pgid << " (" << mpgid << ")"
        << " -> up " << up << " acting " << acting;
     rdata.append(ds);
@@ -2720,10 +2724,17 @@ bool OSDMonitor::prepare_command(MMonCommand *m)
       string name;
       cmd_getval(g_ceph_context, cmdmap, "name", name);
 
-      if (!newcrush.name_exists(name)) {
+      if (!osdmap.crush->name_exists(name)) {
 	err = 0;
 	ss << "device '" << name << "' does not appear in the crush map";
 	break;
+      }
+      if (!newcrush.name_exists(name)) {
+	err = 0;
+	ss << "device '" << name << "' does not appear in the crush map";
+	getline(ss, rs);
+	wait_for_finished_proposal(new Monitor::C_Command(mon, m, 0, rs, get_last_committed()));
+	return true;
       }
       int id = newcrush.get_item_id(name);
       bool unlink_only = prefix == "osd crush unlink";

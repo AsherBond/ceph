@@ -53,6 +53,10 @@ public:
 private:
   PGMap::Incremental pending_inc;
 
+  const char *pgmap_meta_prefix;
+  const char *pgmap_pg_prefix;
+  const char *pgmap_osd_prefix;
+
   void create_initial();
   void update_from_paxos(bool *need_bootstrap);
   void upgrade_format();
@@ -60,7 +64,7 @@ private:
   void handle_osd_timeouts();
   void create_pending();  // prepare a new pending
   // propose pending update to peers
-  void update_trim();
+  version_t get_trim_to();
   void update_logger();
 
   void encode_pending(MonitorDBStore::Transaction *t);
@@ -146,9 +150,19 @@ public:
   PGMonitor(Monitor *mn, Paxos *p, const string& service_name)
     : PaxosService(mn, p, service_name),
       need_check_down_pgs(false),
-      last_map_pg_create_osd_epoch(0)
+      last_map_pg_create_osd_epoch(0),
+      pgmap_meta_prefix("pgmap_meta"),
+      pgmap_pg_prefix("pgmap_pg"),
+      pgmap_osd_prefix("pgmap_osd")
   { }
   ~PGMonitor() { }
+
+  virtual void get_store_prefixes(set<string>& s) {
+    s.insert(get_service_name());
+    s.insert(pgmap_meta_prefix);
+    s.insert(pgmap_pg_prefix);
+    s.insert(pgmap_osd_prefix);
+  }
 
   virtual void on_restart();
 

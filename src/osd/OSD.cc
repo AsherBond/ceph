@@ -1055,6 +1055,7 @@ bool OSD::asok_command(string command, string args, ostream& ss)
 
       f.open_array_section("watch");
 
+      f.dump_string("namespace", it->obj.nspace);
       f.dump_string("object", it->obj.oid.name);
 
       f.open_object_section("entity_name");
@@ -3086,13 +3087,13 @@ void OSD::check_ops_in_flight()
 }
 
 // Usage:
-//   setomapval <pool-id> <obj-name> <key> <val>
-//   rmomapkey <pool-id> <obj-name> <key>
-//   setomapheader <pool-id> <obj-name> <header>
-//   getomap <pool> <obj-name>
-//   truncobj <pool-id> <obj-name> <newlen>
-//   injectmdataerr
-//   injectdataerr
+//   setomapval <pool-id> [namespace/]<obj-name> <key> <val>
+//   rmomapkey <pool-id> [namespace/]<obj-name> <key>
+//   setomapheader <pool-id> [namespace/]<obj-name> <header>
+//   getomap <pool> [namespace/]<obj-name>
+//   truncobj <pool-id> [namespace/]<obj-name> <newlen>
+//   injectmdataerr [namespace/]<obj-name>
+//   injectdataerr [namespace/]<obj-name>
 void TestOpsSocketHook::test_ops(OSDService *service, ObjectStore *store,
      std::string command, std::string args, ostream &ss)
 {
@@ -3124,21 +3125,29 @@ void TestOpsSocketHook::test_ops(OSDService *service, ObjectStore *store,
     if (pool < 0 && isdigit(argv[1].c_str()[0]))
       pool = atoll(argv[1].c_str());
     r = -1;
-    if (pool >= 0)
-        r = curmap->object_locator_to_pg(object_t(argv[2]),
-          object_locator_t(pool), rawpg);
+    string objname, nspace;
+    objname = string(argv[2]);
+    if (pool >= 0) {
+        std::size_t found = argv[2].find_first_of('/');
+        if (found != string::npos) {
+          nspace = argv[2].substr(0, found);
+          objname = argv[2].substr(found+1);
+        }
+        object_locator_t oloc(pool, nspace);
+        r = curmap->object_locator_to_pg(object_t(objname), oloc,  rawpg);
+    }
     if (r < 0) {
         ss << "Invalid pool " << argv[1];
         return;
     }
     pgid = curmap->raw_pg_to_pg(rawpg);
 
-    hobject_t obj(object_t(argv[2]), string(""), CEPH_NOSNAP, rawpg.ps(), pool);
+    hobject_t obj(object_t(objname), string(""), CEPH_NOSNAP, rawpg.ps(), pool, nspace);
     ObjectStore::Transaction t;
 
     if (command == "setomapval") {
       if (argc != 5) {
-        ss << "usage: setomapval <pool> <obj-name> <key> <val>";
+        ss << "usage: setomapval <pool> [namespace/]<obj-name> <key> <val>";
         return;
       }
       map<string, bufferlist> newattrs;
@@ -3155,7 +3164,7 @@ void TestOpsSocketHook::test_ops(OSDService *service, ObjectStore *store,
         ss << "ok";
     } else if (command == "rmomapkey") {
       if (argc != 4) {
-        ss << "usage: rmomapkey <pool> <obj-name> <key>";
+        ss << "usage: rmomapkey <pool> [namespace/]<obj-name> <key>";
         return;
       }
       set<string> keys;
@@ -3169,7 +3178,7 @@ void TestOpsSocketHook::test_ops(OSDService *service, ObjectStore *store,
         ss << "ok";
     } else if (command == "setomapheader") {
       if (argc != 4) {
-        ss << "usage: setomapheader <pool> <obj-name> <header>";
+        ss << "usage: setomapheader <pool> [namespace/]<obj-name> <header>";
         return;
       }
       bufferlist newheader;
@@ -3183,7 +3192,7 @@ void TestOpsSocketHook::test_ops(OSDService *service, ObjectStore *store,
         ss << "ok";
     } else if (command == "getomap") {
       if (argc != 3) {
-        ss << "usage: getomap <pool> <obj-name>";
+        ss << "usage: getomap <pool> [namespace/]<obj-name>";
         return;
       }
       //Debug: Output entire omap
@@ -3201,7 +3210,7 @@ void TestOpsSocketHook::test_ops(OSDService *service, ObjectStore *store,
       }
     } else if (command == "truncobj") {
       if (argc != 4) {
-	ss << "usage: truncobj <pool> <obj-name> <val>";
+	ss << "usage: truncobj <pool> [namespace/]<obj-name> <val>";
 	return;
       }
       t.truncate(coll_t(pgid), obj, atoi(argv[3].c_str()));
@@ -3655,9 +3664,11 @@ void OSD::send_pg_stats(const utime_t &now)
       pg->pg_stats_publish_lock.Lock();
       if (pg->pg_stats_publish_valid) {
 	m->pg_stat[pg->info.pgid] = pg->pg_stats_publish;
-	dout(25) << " sending " << pg->info.pgid << " " << pg->pg_stats_publish.reported << dendl;
+	dout(25) << " sending " << pg->info.pgid << " " << pg->pg_stats_publish.reported_epoch << ":"
+		 << pg->pg_stats_publish.reported_seq << dendl;
       } else {
-	dout(25) << " NOT sending " << pg->info.pgid << " " << pg->pg_stats_publish.reported << ", not valid" << dendl;
+	dout(25) << " NOT sending " << pg->info.pgid << " " << pg->pg_stats_publish.reported_epoch << ":"
+		 << pg->pg_stats_publish.reported_seq << ", not valid" << dendl;
       }
       pg->pg_stats_publish_lock.Unlock();
     }
@@ -3697,19 +3708,22 @@ void OSD::handle_pg_stats_ack(MPGStatsAck *ack)
     ++p;
 
     if (ack->pg_stat.count(pg->info.pgid)) {
-      eversion_t acked = ack->pg_stat[pg->info.pgid];
+      pair<version_t,epoch_t> acked = ack->pg_stat[pg->info.pgid];
       pg->pg_stats_publish_lock.Lock();
-      if (acked == pg->pg_stats_publish.reported) {
-	dout(25) << " ack on " << pg->info.pgid << " " << pg->pg_stats_publish.reported << dendl;
+      if (acked.first == pg->pg_stats_publish.reported_seq &&
+	  acked.second == pg->pg_stats_publish.reported_epoch) {
+	dout(25) << " ack on " << pg->info.pgid << " " << pg->pg_stats_publish.reported_epoch
+		 << ":" << pg->pg_stats_publish.reported_seq << dendl;
 	pg->stat_queue_item.remove_myself();
 	pg->put("pg_stat_queue");
       } else {
-	dout(25) << " still pending " << pg->info.pgid << " " << pg->pg_stats_publish.reported
-		 << " > acked " << acked << dendl;
+	dout(25) << " still pending " << pg->info.pgid << " " << pg->pg_stats_publish.reported_epoch
+		 << ":" << pg->pg_stats_publish.reported_seq << " > acked " << acked << dendl;
       }
       pg->pg_stats_publish_lock.Unlock();
     } else {
-      dout(30) << " still pending " << pg->info.pgid << " " << pg->pg_stats_publish.reported << dendl;
+      dout(30) << " still pending " << pg->info.pgid << " " << pg->pg_stats_publish.reported_epoch
+	       << ":" << pg->pg_stats_publish.reported_seq << dendl;
     }
   }
   

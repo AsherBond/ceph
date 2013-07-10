@@ -1340,13 +1340,15 @@ bool PG::op_has_sufficient_caps(OpRequestRef op)
   if (key.length() == 0)
     key = req->get_oid().name;
 
-  bool cap = caps.is_capable(pool.name, pool.auid, key,
+  bool cap = caps.is_capable(pool.name, req->get_object_locator().nspace,
+                             pool.auid, key,
 			     op->need_read_cap(),
 			     op->need_write_cap(),
 			     op->need_class_read_cap(),
 			     op->need_class_write_cap());
 
   dout(20) << "op_has_sufficient_caps pool=" << pool.id << " (" << pool.name
+		   << " " << req->get_object_locator().nspace
 	   << ") owner=" << pool.auid
 	   << " need_read_cap=" << op->need_read_cap()
 	   << " need_write_cap=" << op->need_write_cap()
@@ -1888,7 +1890,8 @@ void PG::publish_stats_to_osd()
   pg_stats_publish_lock.Lock();
   if (is_primary()) {
     // update our stat summary
-    info.stats.reported.inc(info.history.same_primary_since);
+    info.stats.reported_epoch = get_osdmap()->get_epoch();
+    ++info.stats.reported_seq;
     info.stats.version = info.last_update;
     info.stats.created = info.history.epoch_created;
     info.stats.last_scrub = info.history.last_scrub;
@@ -1961,7 +1964,8 @@ void PG::publish_stats_to_osd()
       pg_stats_publish.stats.sum.num_objects_unfound = get_num_unfound();
     }
 
-    dout(15) << "publish_stats_to_osd " << pg_stats_publish.reported << dendl;
+    dout(15) << "publish_stats_to_osd " << pg_stats_publish.reported_epoch
+	     << ":" << pg_stats_publish.reported_seq << dendl;
   } else {
     pg_stats_publish_valid = false;
     dout(15) << "publish_stats_to_osd -- not primary" << dendl;
@@ -5929,6 +5933,14 @@ boost::statechart::result PG::RecoveryState::Active::react(const AdvMap& advmap)
       pg->state_set(PG_STATE_DEGRADED);
     pg->publish_stats_to_osd(); // degraded may have changed
   }
+
+  // if we haven't reported our PG stats in a long time, do so now.
+  if (pg->info.stats.reported_epoch + g_conf->osd_pg_stat_report_interval_max < advmap.osdmap->get_epoch()) {
+    dout(20) << "reporting stats to osd after " << (advmap.osdmap->get_epoch() - pg->info.stats.reported_epoch)
+	     << " epochs" << dendl;
+    pg->publish_stats_to_osd();
+  }
+
   return forward_event();
 }
     

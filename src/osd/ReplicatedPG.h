@@ -291,6 +291,8 @@ public:
     eversion_t at_version;       // pg's current version pointer
     eversion_t reply_version;    // the version that we report the client (depends on the op)
 
+    int current_osd_subop_num;
+
     ObjectStore::Transaction op_t, local_t;
     vector<pg_log_entry_t> log;
 
@@ -317,6 +319,7 @@ public:
       new_obs(_obs->oi, _obs->exists),
       modify(false), user_modify(false),
       bytes_written(0), bytes_read(0),
+      current_osd_subop_num(0),
       obc(0), clone_obc(0), snapset_obc(0), data_off(0), reply(NULL), pg(_pg) { 
       if (_ssc) {
 	new_snapset = _ssc->snapset;
@@ -468,8 +471,7 @@ protected:
   }
   ObjectContext *_lookup_object_context(const hobject_t& oid);
   ObjectContext *create_object_context(const object_info_t& oi, SnapSetContext *ssc);
-  ObjectContext *get_object_context(const hobject_t& soid, const object_locator_t& oloc,
-				    bool can_create);
+  ObjectContext *get_object_context(const hobject_t& soid, bool can_create);
   void register_object_context(ObjectContext *obc) {
     if (!obc->registered) {
       assert(object_contexts.count(obc->obs.oi.soid) == 0);
@@ -484,7 +486,6 @@ protected:
   void put_object_context(ObjectContext *obc);
   void put_object_contexts(map<hobject_t,ObjectContext*>& obcv);
   int find_object_context(const hobject_t& oid,
-			  const object_locator_t& oloc,
 			  ObjectContext **pobc,
 			  bool can_create, snapid_t *psnapid=NULL);
 
@@ -494,7 +495,7 @@ protected:
 
   SnapSetContext *create_snapset_context(const object_t& oid);
   SnapSetContext *get_snapset_context(const object_t& oid, const string &key,
-				      ps_t seed, bool can_create);
+				      ps_t seed, bool can_create, const string &nspace);
   void register_snapset_context(SnapSetContext *ssc) {
     if (!ssc->registered) {
       assert(snapset_contexts.count(ssc->oid) == 0);

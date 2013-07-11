@@ -1946,7 +1946,7 @@ bool OSDMonitor::preprocess_command(MMonCommand *m)
   boost::scoped_ptr<Formatter> f(new_formatter(format));
 
   if (prefix == "osd stat") {
-    osdmap.print_summary(ds);
+    osdmap.print_summary(f.get(), ds);
     rdata.append(ds);
   }
   else if (prefix == "osd dump" ||
@@ -2029,8 +2029,16 @@ bool OSDMonitor::preprocess_command(MMonCommand *m)
     if (p != &osdmap)
       delete p;
   } else if (prefix == "osd getmaxosd") {
-    ds << "max_osd = " << osdmap.get_max_osd() << " in epoch " << osdmap.get_epoch();
-    rdata.append(ds);
+    if (f) {
+      f->open_object_section("getmaxosd");
+      f->dump_int("epoch", osdmap.get_epoch());
+      f->dump_int("max_osd", osdmap.get_max_osd());
+      f->close_section();
+      f->flush(rdata);
+    } else {
+      ds << "max_osd = " << osdmap.get_max_osd() << " in epoch " << osdmap.get_epoch();
+      rdata.append(ds);
+    }
   } else if (prefix  == "osd find") {
     int64_t osd;
     cmd_getval(g_ceph_context, cmdmap, "id", osd);
@@ -2073,16 +2081,32 @@ bool OSDMonitor::preprocess_command(MMonCommand *m)
     pg_t mpgid = osdmap.raw_pg_to_pg(pgid);
     vector<int> up, acting;
     osdmap.pg_to_up_acting_osds(mpgid, up, acting);
+
     string fullobjname;
     if (!namespacestr.empty())
       fullobjname = namespacestr + string("/") + oid.name;
     else
       fullobjname = oid.name;
-    ds << "osdmap e" << osdmap.get_epoch()
-       << " pool '" << poolstr << "' (" << pool << ") object '" << fullobjname << "' ->"
-       << " pg " << pgid << " (" << mpgid << ")"
-       << " -> up " << up << " acting " << acting;
-    rdata.append(ds);
+    if (f) {
+      f->open_object_section("osd_map");
+      f->dump_int("epoch", osdmap.get_epoch());
+      f->dump_string("pool", poolstr);
+      f->dump_int("pool_id", pool);
+      f->dump_stream("objname") << fullobjname;
+      f->dump_stream("raw_pgid") << pgid;
+      f->dump_stream("pgid") << mpgid;
+      f->dump_stream("up") << up;
+      f->dump_stream("acting") << acting;
+      f->close_section(); // osd_map
+      f->flush(rdata);
+    } else {
+      ds << "osdmap e" << osdmap.get_epoch()
+        << " pool '" << poolstr << "' (" << pool << ")"
+        << " object '" << fullobjname << "' ->"
+        << " pg " << pgid << " (" << mpgid << ")"
+        << " -> up " << up << " acting " << acting;
+      rdata.append(ds);
+    }
   } else if ((prefix == "osd scrub" ||
 	      prefix == "osd deep-scrub" ||
 	      prefix == "osd repair")) {
@@ -2122,26 +2146,108 @@ bool OSDMonitor::preprocess_command(MMonCommand *m)
   } else if (prefix == "osd lspools") {
     int64_t auid;
     cmd_getval(g_ceph_context, cmdmap, "auid", auid, int64_t(0));
+    if (f)
+      f->open_array_section("pools");
     for (map<int64_t, pg_pool_t>::iterator p = osdmap.pools.begin();
 	 p != osdmap.pools.end();
 	 ++p) {
       if (!auid || p->second.auid == (uint64_t)auid) {
-	ds << p->first << ' ' << osdmap.pool_name[p->first] << ',';
+	if (f) {
+	  f->open_object_section("pool");
+	  f->dump_int("poolnum", p->first);
+	  f->dump_string("poolname", osdmap.pool_name[p->first]);
+	  f->close_section();
+	} else {
+	  ds << p->first << ' ' << osdmap.pool_name[p->first] << ',';
+	}
       }
+    }
+    if (f) {
+      f->close_section();
+      f->flush(ds);
     }
     rdata.append(ds);
   } else if (prefix == "osd blacklist ls") {
+    if (f)
+      f->open_array_section("blacklist");
+
     for (hash_map<entity_addr_t,utime_t>::iterator p = osdmap.blacklist.begin();
 	 p != osdmap.blacklist.end();
 	 ++p) {
-      stringstream ss;
-      string s;
-      ss << p->first << " " << p->second;
-      getline(ss, s);
-      s += "\n";
-      rdata.append(s);
+      if (f) {
+	f->open_object_section("entry");
+	f->dump_stream("addr") << p->first;
+	f->dump_stream("until") << p->second;
+	f->close_section();
+      } else {
+	stringstream ss;
+	string s;
+	ss << p->first << " " << p->second;
+	getline(ss, s);
+	s += "\n";
+	rdata.append(s);
+      }
+    }
+    if (f) {
+      f->close_section();
+      f->flush(rdata);
     }
     ss << "listed " << osdmap.blacklist.size() << " entries";
+
+  } else if (prefix == "osd pool get") {
+    string poolstr;
+    cmd_getval(g_ceph_context, cmdmap, "pool", poolstr);
+    int64_t pool = osdmap.lookup_pg_pool_name(poolstr.c_str());
+    if (pool < 0) {
+      ss << "unrecognized pool '" << poolstr << "'";
+      r = -ENOENT;
+      goto reply;
+    }
+
+    const pg_pool_t *p = osdmap.get_pg_pool(pool);
+    string var;
+    cmd_getval(g_ceph_context, cmdmap, "var", var);
+
+    if (f) {
+      f->open_object_section("pool");
+      f->dump_string("pool", poolstr);
+      f->dump_int("pool_id", pool);
+
+      if (var == "pg_num") {
+        f->dump_int("pg_num", p->get_pg_num());
+      } else if (var == "pgp_num") {
+        f->dump_int("pgp_num", p->get_pgp_num());
+      } else if (var == "size") {
+        f->dump_int("size", p->get_size());
+      } else if (var == "min_size") {
+        f->dump_int("min_size", p->get_min_size());
+      } else if (var == "crash_replay_interval") {
+        f->dump_int("crash_replay_interval", p->get_crash_replay_interval());
+      } else if (var == "crush_ruleset") {
+        f->dump_int("crush_ruleset", p->get_crush_ruleset());
+      }
+
+      f->close_section();
+      f->flush(rdata);
+    } else {
+      if (var == "pg_num") {
+        ss << "pg_num: " << p->get_pg_num();
+      } else if (var == "pgp_num") {
+        ss << "pgp_num: " << p->get_pgp_num();
+      } else if (var == "size") {
+        ss << "size: " << p->get_size();
+      } else if (var == "min_size") {
+        ss << "min_size: " << p->get_min_size();
+      } else if (var == "crash_replay_interval") {
+        ss << "crash_replay_interval: " << p->get_crash_replay_interval();
+      } else if (var == "crush_ruleset") {
+        ss << "crush_ruleset: " << p->get_crush_ruleset();
+      }
+      rdata.append(ss);
+      ss.str("");
+    }
+    r = 0;
+
   } else if (prefix == "osd crush rule list" ||
 	     prefix == "osd crush rule ls") {
     string format;
@@ -2463,6 +2569,10 @@ bool OSDMonitor::prepare_command(MMonCommand *m)
     mon->reply_command(m, -EINVAL, rs, get_last_committed());
     return true;
   }
+
+  string format;
+  cmd_getval(g_ceph_context, cmdmap, "format", format, string("plain"));
+  boost::scoped_ptr<Formatter> f(new_formatter(format));
 
   MonSession *session = m->get_session();
   if (!session ||
@@ -3053,6 +3163,8 @@ bool OSDMonitor::prepare_command(MMonCommand *m)
     if (!cmd_getval(g_ceph_context, cmdmap, "sure", sure) || sure != "--yes-i-really-mean-it") {
       ss << "are you SURE?  this might mean real, permanent data loss.  pass "
 	    "--yes-i-really-mean-it if you really do.";
+      err = -EPERM;
+      goto reply;
     } else if (!osdmap.exists(id) || !osdmap.is_down(id)) {
       ss << "osd." << id << " is not down or doesn't exist";
     } else {
@@ -3080,8 +3192,15 @@ bool OSDMonitor::prepare_command(MMonCommand *m)
       if (i >= 0) {
 	// osd already exists
 	err = 0;
-	ss << i;
-	rdata.append(ss);
+	if (f) {
+	  f->open_object_section("created_osd");
+	  f->dump_int("osdid", i);
+	  f->close_section();
+	  f->flush(rdata);
+	} else {
+	  ss << i;
+	  rdata.append(ss);
+	}
 	goto reply;
       }
       i = pending_inc.identify_osd(uuid);
@@ -3113,8 +3232,15 @@ done:
     pending_inc.new_state[i] |= CEPH_OSD_EXISTS | CEPH_OSD_NEW;
     if (!uuid.is_zero())
       pending_inc.new_uuid[i] = uuid;
-    ss << i;
-    rdata.append(ss);
+    if (f) {
+      f->open_object_section("created_osd");
+      f->dump_int("osdid", i);
+      f->close_section();
+      f->flush(rdata);
+    } else {
+      ss << i;
+      rdata.append(ss);
+    }
     wait_for_finished_proposal(new Monitor::C_Command(mon, m, 0, rs, rdata, get_last_committed()));
     return true;
 
@@ -3421,42 +3547,6 @@ done:
     rs = ss.str();
     wait_for_finished_proposal(new Monitor::C_Command(mon, m, 0, rs, get_last_committed()));
     return true;
-
-  } else if (prefix == "osd pool get") {
-    string poolstr;
-    cmd_getval(g_ceph_context, cmdmap, "pool", poolstr);
-    int64_t pool = osdmap.lookup_pg_pool_name(poolstr.c_str());
-    if (pool < 0) {
-      ss << "unrecognized pool '" << poolstr << "'";
-      err = -ENOENT;
-      goto reply;
-    }
-
-    const pg_pool_t *p = osdmap.get_pg_pool(pool);
-    string var;
-    cmd_getval(g_ceph_context, cmdmap, "var", var);
-    if (var == "pg_num") {
-      ss << "pg_num: " << p->get_pg_num();
-    }
-    if (var == "pgp_num") {
-      ss << "pgp_num: " << p->get_pgp_num();
-    }
-    if (var == "size") {
-      ss << "size: " << p->get_size();
-    }
-    if (var == "min_size") {
-      ss << "min_size: " << p->get_min_size();
-    }
-    if (var == "crash_replay_interval") {
-      ss << "crash_replay_interval: " << p->get_crash_replay_interval();
-    }
-    if (var == "crush_ruleset") {
-      ss << "crush_ruleset: " << p->get_crush_ruleset();
-    }
-    rdata.append(ss);
-    ss.str("");
-    err = 0;
-    goto reply;
 
   } else if (prefix == "osd reweight-by-utilization") {
     int64_t oload;

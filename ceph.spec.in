@@ -366,6 +366,7 @@ fi
 %{_bindir}/cephfs
 %{_bindir}/ceph-conf
 %{_bindir}/ceph-clsinfo
+%{_bindir}/ceph-rest-api
 %{_bindir}/crushtool
 %{_bindir}/monmaptool
 %{_bindir}/osdmaptool
@@ -398,6 +399,10 @@ fi
 %{_libdir}/rados-classes/libcls_lock.so*
 %{_libdir}/rados-classes/libcls_kvs.so*
 %{_libdir}/rados-classes/libcls_refcount.so*
+%{_libdir}/rados-classes/libcls_log.so*
+%{_libdir}/rados-classes/libcls_replica_log.so*
+%{_libdir}/rados-classes/libcls_statelog.so*
+%{_libdir}/rados-classes/libcls_version.so*
 %{_libdir}/ceph
 /lib/udev/rules.d/50-rbd.rules
 /lib/udev/rules.d/60-ceph-partuuid-workaround.rules
@@ -585,9 +590,16 @@ fi
 %{_bindir}/ceph_streamtest
 %{_bindir}/ceph_test_cfuse_cache_invalidate
 %{_bindir}/ceph_test_cls_lock
+%{_bindir}/ceph_test_cls_log
 %{_bindir}/ceph_test_cls_rbd
 %{_bindir}/ceph_test_cls_refcount
+%{_bindir}/ceph_test_cls_replica_log
 %{_bindir}/ceph_test_cls_rgw
+%{_bindir}/ceph_test_cls_rgw_log
+%{_bindir}/ceph_test_cls_rgw_meta
+%{_bindir}/ceph_test_cls_rgw_opstate
+%{_bindir}/ceph_test_cls_statelog
+%{_bindir}/ceph_test_cls_version
 %{_bindir}/ceph_test_cors
 %{_bindir}/ceph_test_filejournal
 %{_bindir}/ceph_test_filestore

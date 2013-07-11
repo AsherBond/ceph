@@ -558,8 +558,13 @@ bool AuthMonitor::preprocess_command(MMonCommand *m)
   EntityName entity;
   if (!entity_name.empty() && !entity.from_str(entity_name)) {
     ss << "invalid entity_auth " << entity_name;
-    r = -EINVAL;
+    mon->reply_command(m, -EINVAL, ss.str(), get_last_committed());
+    return true;
   }
+
+  string format;
+  cmd_getval(g_ceph_context, cmdmap, "format", format, string("plain"));
+  boost::scoped_ptr<Formatter> f(new_formatter(format));
 
   if (prefix == "auth export") {
     KeyRing keyring;
@@ -569,7 +574,10 @@ bool AuthMonitor::preprocess_command(MMonCommand *m)
       if (keyring.get_auth(entity, eauth)) {
 	KeyRing kr;
 	kr.add(entity, eauth);
-	kr.encode_plaintext(rdata);
+	if (f)
+	  kr.encode_formatted("auth", f.get(), rdata);
+	else
+	  kr.encode_plaintext(rdata);
 	ss << "export " << eauth;
 	r = 0;
       } else {
@@ -577,7 +585,11 @@ bool AuthMonitor::preprocess_command(MMonCommand *m)
 	r = -ENOENT;
       }
     } else {
-      keyring.encode_plaintext(rdata);
+      if (f)
+	keyring.encode_formatted("auth", f.get(), rdata);
+      else
+	keyring.encode_plaintext(rdata);
+
       ss << "exported master keyring";
       r = 0;
     }
@@ -589,7 +601,10 @@ bool AuthMonitor::preprocess_command(MMonCommand *m)
       r = -ENOENT;
     } else {
       keyring.add(entity, entity_auth);
-      keyring.encode_plaintext(rdata);
+      if (f)
+	keyring.encode_formatted("auth", f.get(), rdata);
+      else
+	keyring.encode_plaintext(rdata);
       ss << "exported keyring for " << entity_name;
       r = 0;
     }
@@ -602,10 +617,23 @@ bool AuthMonitor::preprocess_command(MMonCommand *m)
       r = -ENOENT;
       goto done;
     }
-    ds << auth.key;
+    if (f) {
+      auth.key.encode_formatted("auth", f.get(), rdata);
+    } else {
+      auth.key.encode_plaintext(rdata);
+    }
     r = 0;
   } else if (prefix == "auth list") {
-    mon->key_server.list_secrets(ss, ds);
+    if (f) {
+      mon->key_server.encode_formatted("auth", f.get(), rdata);
+      f->flush(rdata);
+    } else {
+      mon->key_server.encode_plaintext(rdata);
+      if (rdata.length() > 0)
+        ss << "installed auth entries:" << std::endl;
+      else
+        ss << "no installed auth entries!" << std::endl;
+    }
     r = 0;
     goto done;
   } else {
@@ -663,6 +691,10 @@ bool AuthMonitor::prepare_command(MMonCommand *m)
 
   cmd_getval(g_ceph_context, cmdmap, "prefix", prefix);
 
+  string format;
+  cmd_getval(g_ceph_context, cmdmap, "format", format, string("plain"));
+  boost::scoped_ptr<Formatter> f(new_formatter(format));
+
   MonSession *session = m->get_session();
   if (!session ||
       (!mon->_allowed_command(session, cmdmap))) {
@@ -691,7 +723,7 @@ bool AuthMonitor::prepare_command(MMonCommand *m)
     try {
       ::decode(keyring, iter);
     } catch (const buffer::error &ex) {
-      ss << "error decoding keyring";
+      ss << "error decoding keyring" << " " << ex.what();
       rs = err;
       goto done;
     }
@@ -765,11 +797,19 @@ bool AuthMonitor::prepare_command(MMonCommand *m)
       }
 
       if (prefix == "auth get-or-create-key") {
-	ds << entity_auth.key;
+        if (f) {
+          entity_auth.key.encode_formatted("auth", f.get(), rdata);
+        } else {
+          ds << entity_auth.key;
+        }
       } else {
 	KeyRing kr;
 	kr.add(entity, entity_auth.key);
-	kr.encode_plaintext(rdata);
+        if (f) {
+          kr.encode_formatted("auth", f.get(), rdata);
+        } else {
+          kr.encode_plaintext(rdata);
+        }
       }
       err = 0;
       goto done;
@@ -804,11 +844,19 @@ bool AuthMonitor::prepare_command(MMonCommand *m)
     push_cephx_inc(auth_inc);
 
     if (prefix == "auth get-or-create-key") {
-      ds << auth_inc.auth.key;
+      if (f) {
+        auth_inc.auth.key.encode_formatted("auth", f.get(), rdata);
+      } else {
+        ds << auth_inc.auth.key;
+      }
     } else {
       KeyRing kr;
       kr.add(entity, auth_inc.auth.key);
-      kr.encode_plaintext(rdata);
+      if (f) {
+        kr.encode_formatted("auth", f.get(), rdata);
+      } else {
+        kr.encode_plaintext(rdata);
+      }
     }
 
     rdata.append(ds);

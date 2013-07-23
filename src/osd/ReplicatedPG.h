@@ -551,6 +551,9 @@ protected:
   };
   map<hobject_t, PullInfo> pulling;
 
+  // Track contents of temp collection, clear on reset
+  set<hobject_t> temp_contents;
+
   ObjectRecoveryInfo recalc_subsets(const ObjectRecoveryInfo& recovery_info);
   static void trim_pushed_data(const interval_set<uint64_t> &copy_subset,
 			       const interval_set<uint64_t> &intervals_received,
@@ -750,7 +753,7 @@ protected:
   int prepare_transaction(OpContext *ctx);
   
   // pg on-disk content
-  void clean_up_local(ObjectStore::Transaction& t);
+  void check_local();
 
   void _clear_recovery_state();
 
@@ -979,6 +982,7 @@ private:
     bool need_share_pg_info;
     bool requeue;
     SnapTrimmer(ReplicatedPG *pg) : pg(pg), need_share_pg_info(false), requeue(false) {}
+    ~SnapTrimmer();
     void log_enter(const char *state_name);
     void log_exit(const char *state_name, utime_t duration);
   } snap_trimmer_machine;
@@ -1042,7 +1046,7 @@ public:
   void _finish_mark_all_unfound_lost(list<ObjectContext*>& obcs);
 
   void on_role_change();
-  void on_change();
+  void on_change(ObjectStore::Transaction *t);
   void on_activate();
   void on_flushed();
   void on_removal(ObjectStore::Transaction *t);

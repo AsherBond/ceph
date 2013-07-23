@@ -172,7 +172,7 @@ static int get_obj_vals(cls_method_context_t hctx, const string& start, const st
     return 0;
 
   map<string, bufferlist> new_keys;
-  char c[] = { BI_PREFIX_CHAR + 1, 0 };
+  char c[] = { (char)(BI_PREFIX_CHAR + 1), 0 };
   string new_start = c;
 
   /* now get some more keys */
@@ -656,7 +656,7 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
   }
 
   list<string>::iterator remove_iter;
-  CLS_LOG(0, "rgw_bucket_complete_op(): remove_objs.size()=%d\n", (int)op.remove_objs.size());
+  CLS_LOG(20, "rgw_bucket_complete_op(): remove_objs.size()=%d\n", (int)op.remove_objs.size());
   for (remove_iter = op.remove_objs.begin(); remove_iter != op.remove_objs.end(); ++remove_iter) {
     string& remove_oid_name = *remove_iter;
     CLS_LOG(1, "rgw_bucket_complete_op(): removing entries, read_index_entry name=%s\n", remove_oid_name.c_str());
@@ -985,7 +985,7 @@ static int rgw_bi_log_trim(cls_method_context_t hctx, bufferlist *in, bufferlist
   if (ret < 0)
     return ret;
 
-  if (entries.size() == 0)
+  if (entries.empty())
     return -ENODATA;
 
   list<rgw_bi_log_entry>::iterator iter;

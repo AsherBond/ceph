@@ -15,6 +15,7 @@ Foundation.  See file COPYING.
 import copy
 import json
 import os
+import re
 import socket
 import stat
 import sys
@@ -175,21 +176,31 @@ class CephFloat(CephArgtype):
 
 class CephString(CephArgtype):
     """
-    String; pretty generic.
+    String; pretty generic.  goodchars is a RE char class of valid chars
     """
-    def __init__(self, badchars=''):
-        self.badchars = badchars
+    def __init__(self, goodchars=''):
+        from string import printable
+        try:
+            re.compile(goodchars)
+        except:
+            raise ValueError('CephString(): "{0}" is not a valid RE'.\
+                format(goodchars))
+        self.goodchars = goodchars
+        self.goodset = frozenset(
+            [c for c in printable if re.match(goodchars, c)]
+        )
 
     def valid(self, s, partial=False):
-        for c in self.badchars:
-            if c in s:
-                raise ArgumentFormat("bad char {0} in {1}".format(c, s))
+        sset = set(s)
+        if self.goodset and not sset <= self.goodset:
+            raise ArgumentFormat("invalid chars {0} in {1}".\
+                format(''.join(sset - self.goodset), s))
         self.val = s
 
     def __str__(self):
         b = ''
-        if len(self.badchars):
-            b = '(without chars in {0})'.format(self.badchars)
+        if self.goodchars:
+            b += '(goodchars {0})'.format(self.goodchars)
         return '<string{0}>'.format(b)
 
 class CephSocketpath(CephArgtype):
@@ -310,18 +321,20 @@ class CephName(CephArgtype):
 
     Also accept '*'
     """
+    def __init__(self):
+        self.nametype = None
+        self.nameid = None
+
     def valid(self, s, partial=False):
         if s == '*':
             self.val = s
-            self.nametype = None
-            self.nameid = None
             return
         if s.find('.') == -1:
             raise ArgumentFormat('CephName: no . in {0}'.format(s))
         else:
             t, i = s.split('.')
             if not t in ('osd', 'mon', 'client', 'mds'):
-                raise ArgumentValid('unknown type ' + self.t)
+                raise ArgumentValid('unknown type ' + t)
             if t == 'osd':
                 if i != '*':
                     try:
@@ -341,19 +354,21 @@ class CephOsdName(CephArgtype):
 
     osd.<id>, or <id>, or *, where id is a base10 int
     """
+    def __init__(self):
+        self.nametype = None
+        self.nameid = None
+
     def valid(self, s, partial=False):
         if s == '*':
             self.val = s
-            self.nametype = None
-            self.nameid = None
             return
         if s.find('.') != -1:
             t, i = s.split('.')
+            if t != 'osd':
+                raise ArgumentValid('unknown type ' + t)
         else:
             t = 'osd'
             i = s
-        if t != 'osd':
-            raise ArgumentValid('unknown type ' + self.t)
         try:
             i = int(i)
         except:
@@ -370,7 +385,7 @@ class CephChoices(CephArgtype):
     Set of string literals; init with valid choices
     """
     def __init__(self, strings='', **kwargs):
-        self.strings=strings.split('|')
+        self.strings = strings.split('|')
 
     def valid(self, s, partial=False):
         if not partial:
@@ -512,16 +527,16 @@ class argdesc(object):
     def __repr__(self):
         r = 'argdesc(' + str(self.t) + ', '
         internals = ['N', 'typeargs', 'instance', 't']
-        for (k,v) in self.__dict__.iteritems():
+        for (k, v) in self.__dict__.iteritems():
             if k.startswith('__') or k in internals:
                 pass
             else:
                 # undo modification from __init__
                 if k == 'n' and self.N:
                     v = 'N'
-                r += '{0}={1}, '.format(k,v)
-        for (k,v) in self.typeargs.iteritems():
-                r += '{0}={1}, '.format(k,v)
+                r += '{0}={1}, '.format(k, v)
+        for (k, v) in self.typeargs.iteritems():
+            r += '{0}={1}, '.format(k, v)
         return r[:-2] + ')'
 
     def __str__(self):
@@ -687,7 +702,7 @@ def matchnum(args, signature, partial=False):
         while desc.numseen < desc.n:
             # if there are no more arguments, return
             if not words:
-                return matchcnt;
+                return matchcnt
             word = words.pop(0)
 
             try:
@@ -790,7 +805,7 @@ def validate(args, signature, partial=False):
                     # hm, but it was required, so quit
                     if partial:
                         return d
-                    raise ArgumentFormat('{0} not valid argument {1}: {2}'.format(str(myarg), desc, e))
+                    raise e
 
             # valid arg acquired.  Store in dict, as a list if multivalued
             if desc.N:
@@ -848,19 +863,19 @@ def validate_command(parsed_args, sigdict, args, verbose=False):
                 sig = cmd['sig']
                 helptext = cmd['help']
                 try:
-                    valid_dict = validate(args, sig, verbose)
+                    valid_dict = validate(args, sig)
                     found = cmd
                     break
+                except ArgumentPrefix:
+                    # ignore prefix mismatches; we just haven't found
+                    # the right command yet
+                    pass
                 except ArgumentError as e:
                     # prefixes matched, but some other arg didn't;
-                    # this is interesting information if verbose
-                    if verbose:
-                        print >> sys.stderr, '{0}: invalid command'.\
-                            format(' '.join(args))
-                        print >> sys.stderr, '{0}'.format(e)
-                        print >> sys.stderr, "did you mean {0}?\n\t{1}".\
-                            format(concise_sig(sig), helptext)
-                    pass
+                    # stop now, because we have the right command but
+                    # some other input is invalid
+                    print >> sys.stderr, "Invalid command: ", str(e)
+                    return {}
                 if found:
                     break
 
@@ -874,12 +889,9 @@ def validate_command(parsed_args, sigdict, args, verbose=False):
         if parsed_args.output_format:
             valid_dict['format'] = parsed_args.output_format
 
-        if parsed_args.threshold:
-            valid_dict['threshold'] = parsed_args.threshold
-
         return valid_dict
 
-def send_command(cluster, target=('mon', ''), cmd=[], inbuf='', timeout=0, 
+def send_command(cluster, target=('mon', ''), cmd=None, inbuf='', timeout=0, 
                  verbose=False):
     """
     Send a command to a daemon using librados's
@@ -892,6 +904,7 @@ def send_command(cluster, target=('mon', ''), cmd=[], inbuf='', timeout=0,
 
     If target is osd.N, send command to that osd (except for pgid cmds)
     """
+    cmd = cmd or []
     try:
         if target[0] == 'osd':
             osdid = target[1]

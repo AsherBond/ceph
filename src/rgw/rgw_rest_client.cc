@@ -224,6 +224,11 @@ int RGWRESTSimpleRequest::forward_request(RGWAccessKey& key, req_info& info, siz
     headers.push_back(make_pair<string, string>(iter->first, iter->second));
   }
 
+  map<string, string>& meta_map = new_info.x_meta_map;
+  for (iter = meta_map.begin(); iter != meta_map.end(); ++iter) {
+    headers.push_back(make_pair<string, string>(iter->first, iter->second));
+  }
+
   string params_str;
   map<string, string>& args = new_info.args.get_params();
   get_params_str(args, params_str);
@@ -398,6 +403,7 @@ int RGWRESTStreamWriteRequest::put_obj_init(RGWAccessKey& key, rgw_obj& obj, uin
   new_info.script_uri = "/";
   new_info.script_uri.append(resource);
   new_info.request_uri = new_info.script_uri;
+  new_info.effective_uri = new_info.effective_uri;
 
   map<string, string>& m = new_env.get_map();
   map<string, bufferlist>::iterator bliter;
@@ -563,6 +569,7 @@ int RGWRESTStreamReadRequest::get_obj(RGWAccessKey& key, map<string, string>& ex
   new_info.script_uri = "/";
   new_info.script_uri.append(resource);
   new_info.request_uri = new_info.script_uri;
+  new_info.effective_uri = new_info.effective_uri;
 
   new_info.init_meta_info(NULL);
 

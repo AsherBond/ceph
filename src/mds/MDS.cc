@@ -1628,19 +1628,18 @@ void MDS::suicide()
   }
   timer.cancel_all_events();
   //timer.join();
+  timer.shutdown();
   
   // shut down cache
   mdcache->shutdown();
 
   if (objecter->initialized)
     objecter->shutdown_locked();
-  
-  // shut down messenger
-  messenger->shutdown();
 
   monc->shutdown();
 
-  timer.shutdown();
+  // shut down messenger
+  messenger->shutdown();
 }
 
 void MDS::respawn()
@@ -1890,8 +1889,7 @@ bool MDS::_dispatch(Message *m)
     ls.swap(finished_queue);
     while (!ls.empty()) {
       dout(10) << " finish " << ls.front() << dendl;
-      ls.front()->finish(0);
-      delete ls.front();
+      ls.front()->complete(0);
       ls.pop_front();
       
       // give other threads (beacon!) a chance

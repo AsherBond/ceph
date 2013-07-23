@@ -121,7 +121,7 @@ class test_helper {
 
 int test_helper::extract_input(int argc, char *argv[]){
 #define ERR_CHECK_NEXT_PARAM(o) \
-  if((loop + 1) >= argc)return -1; \
+  if(((int)loop + 1) >= argc)return -1;		\
   else o = argv[loop+1];
 
   for(unsigned loop = 1;loop < (unsigned)argc; loop += 2){
@@ -283,7 +283,7 @@ int test_helper::send_request(string method, string res,
     slist = curl_slist_append(slist, auth.c_str());
     slist = curl_slist_append(slist, http_date.c_str());
     for(list<string>::iterator it = extra_hdrs.begin();
-        it != extra_hdrs.end(); it++){
+        it != extra_hdrs.end(); ++it){
       slist = curl_slist_append(slist, (*it).c_str());
     }
     if(read_function)
@@ -321,7 +321,7 @@ int run_rgw_admin(string& cmd, string& resp) {
 
     argv[0] = (char *)"radosgw-admin";
     for (list<string>::iterator it = l.begin(); 
-         it != l.end(); it++) {
+         it != l.end(); ++it) {
       argv[loop++] = (char *)(*it).c_str();
     }
     argv[loop] = NULL;
@@ -373,7 +373,7 @@ int get_creds(string& json, string& creds) {
   decode_json_obj(info, &parser);
   creds = "";
   for(map<string, RGWAccessKey>::iterator it = info.access_keys.begin();
-      it != info.access_keys.end(); it++) {
+      it != info.access_keys.end(); ++it) {
     RGWAccessKey _k = it->second;
     /*cout << "accesskeys [ " << it->first << " ] = " << 
       "{ " << _k.id << ", " << _k.key << ", " << _k.subuser << "}" << std::endl;*/
@@ -504,7 +504,7 @@ static int get_opstate_list(list<cls_statelog_entry> &entries) {
   l = parser.get_array_elements();
   int loop = 0;
   for(vector<string>::iterator it = l.begin();
-      it != l.end(); it++, loop++) {
+      it != l.end(); ++it, loop++) {
     JSONParser jp;
     cls_statelog_entry entry;
 
@@ -575,7 +575,7 @@ TEST(TestRGWAdmin, opstate_set_list_delete) {
     EXPECT_TRUE((*it).client_id.compare(cid_1) == 0);
     EXPECT_TRUE((*it).op_id.compare(oid_1) == 0);
     EXPECT_TRUE((*it).object.compare(obj_1) == 0);
-    EXPECT_EQ((*it).state, RGWOpState::OPSTATE_IN_PROGRESS);
+    EXPECT_EQ((*it).state, (uint32_t)RGWOpState::OPSTATE_IN_PROGRESS);
   }
 
   state = "complete";
@@ -600,7 +600,7 @@ TEST(TestRGWAdmin, opstate_set_list_delete) {
     EXPECT_TRUE((*it).client_id.compare(cid_1) == 0);
     EXPECT_TRUE((*it).op_id.compare(oid_1) == 0);
     EXPECT_TRUE((*it).object.compare(obj_1) == 0);
-    EXPECT_EQ((*it).state, RGWOpState::OPSTATE_COMPLETE);
+    EXPECT_EQ((*it).state, (uint32_t)RGWOpState::OPSTATE_COMPLETE);
   }
 
   ss.str("");
@@ -624,13 +624,13 @@ TEST(TestRGWAdmin, opstate_set_list_delete) {
     EXPECT_TRUE((*it).client_id.compare(cid_1) == 0);
     EXPECT_TRUE((*it).op_id.compare(oid_1) == 0);
     EXPECT_TRUE((*it).object.compare(obj_1) == 0);
-    EXPECT_EQ((*it).state, RGWOpState::OPSTATE_COMPLETE);
+    EXPECT_EQ((*it).state, (uint32_t)RGWOpState::OPSTATE_COMPLETE);
 
     it++;
     EXPECT_TRUE((*it).client_id.compare(cid_2) == 0);
     EXPECT_TRUE((*it).op_id.compare(oid_2) == 0);
     EXPECT_TRUE((*it).object.compare(obj_2) == 0);
-    EXPECT_EQ((*it).state, RGWOpState::OPSTATE_COMPLETE);
+    EXPECT_EQ((*it).state, (uint32_t)RGWOpState::OPSTATE_COMPLETE);
   }
 
   entries.clear();

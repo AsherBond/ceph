@@ -509,6 +509,65 @@ inline ostream& operator<<(ostream& out, const eversion_t e) {
 }
 
 
+/**
+ * power of 2 histogram
+ */
+struct pow2_hist_t {
+  /**
+   * histogram
+   *
+   * bin size is 2^index
+   * value is count of elements that are <= the current bin but > the previous bin.
+   */
+  vector<int32_t> h;
+
+private:
+  /// expand to at least another's size
+  void _expand_to(unsigned s) {
+    if (s > h.size())
+      h.resize(s, 0);
+  }
+  /// drop useless trailing 0's
+  void _contract() {
+    unsigned p = h.size();
+    while (p > 0 && h[p-1] == 0)
+      --p;
+    h.resize(p);
+  }
+
+public:
+  void clear() {
+    h.clear();
+  }
+  void set(int bin, int32_t v) {
+    _expand_to(bin + 1);
+    h[bin] = v;
+    _contract();
+  }
+
+  void add(const pow2_hist_t& o) {
+    _expand_to(o.h.size());
+    for (unsigned p = 0; p < o.h.size(); ++p)
+      h[p] += o.h[p];
+    _contract();
+  }
+  void sub(const pow2_hist_t& o) {
+    _expand_to(o.h.size());
+    for (unsigned p = 0; p < o.h.size(); ++p)
+      h[p] -= o.h[p];
+    _contract();
+  }
+
+  int32_t upper_bound() const {
+    return 1 << h.size();
+  }
+
+  void dump(Formatter *f) const;
+  void encode(bufferlist &bl) const;
+  void decode(bufferlist::iterator &bl);
+  static void generate_test_instances(std::list<pow2_hist_t*>& o);
+};
+WRITE_CLASS_ENCODER(pow2_hist_t)
 
 /** osd_stat
  * aggregate stats for an osd
@@ -517,6 +576,8 @@ struct osd_stat_t {
   int64_t kb, kb_used, kb_avail;
   vector<int> hb_in, hb_out;
   int32_t snap_trim_queue_len, num_snap_trimming;
+
+  pow2_hist_t op_queue_age_hist;
 
   osd_stat_t() : kb(0), kb_used(0), kb_avail(0),
 		 snap_trim_queue_len(0), num_snap_trimming(0) {}
@@ -527,6 +588,7 @@ struct osd_stat_t {
     kb_avail += o.kb_avail;
     snap_trim_queue_len += o.snap_trim_queue_len;
     num_snap_trimming += o.num_snap_trimming;
+    op_queue_age_hist.add(o.op_queue_age_hist);
   }
   void sub(const osd_stat_t& o) {
     kb -= o.kb;
@@ -534,6 +596,7 @@ struct osd_stat_t {
     kb_avail -= o.kb_avail;
     snap_trim_queue_len -= o.snap_trim_queue_len;
     num_snap_trimming -= o.num_snap_trimming;
+    op_queue_age_hist.sub(o.op_queue_age_hist);
   }
 
   void dump(Formatter *f) const;
@@ -562,7 +625,9 @@ inline ostream& operator<<(ostream& out, const osd_stat_t& s) {
   return out << "osd_stat(" << kb_t(s.kb_used) << " used, "
 	     << kb_t(s.kb_avail) << " avail, "
 	     << kb_t(s.kb) << " total, "
-	     << "peers " << s.hb_in << "/" << s.hb_out << ")";
+	     << "peers " << s.hb_in << "/" << s.hb_out
+	     << " op hist " << s.op_queue_age_hist.h
+	     << ")";
 }
 
 
@@ -823,6 +888,28 @@ struct object_stat_sum_t {
       num_keys_recovered(0)
   {}
 
+  void floor(int64_t f) {
+#define FLOOR(x) if (x < f) x = f
+    FLOOR(num_bytes);
+    FLOOR(num_objects);
+    FLOOR(num_object_clones);
+    FLOOR(num_object_copies);
+    FLOOR(num_objects_missing_on_primary);
+    FLOOR(num_objects_degraded);
+    FLOOR(num_objects_unfound);
+    FLOOR(num_rd);
+    FLOOR(num_rd_kb);
+    FLOOR(num_wr);
+    FLOOR(num_wr_kb);
+    FLOOR(num_scrub_errors);
+    FLOOR(num_shallow_scrub_errors);
+    FLOOR(num_deep_scrub_errors);
+    FLOOR(num_objects_recovered);
+    FLOOR(num_bytes_recovered);
+    FLOOR(num_keys_recovered);
+#undef FLOOR
+  }
+
   void clear() {
     memset(this, 0, sizeof(*this));
   }
@@ -873,6 +960,12 @@ struct object_stat_collection_t {
   void clear() {
     sum.clear();
     cat_sum.clear();
+  }
+
+  void floor(int64_t f) {
+    sum.floor(f);
+    for (map<string,object_stat_sum_t>::iterator p = cat_sum.begin(); p != cat_sum.end(); ++p)
+      p->second.floor(f);
   }
 
   void add(const object_stat_sum_t& o, const string& cat) {
@@ -966,6 +1059,14 @@ struct pg_stat_t {
     return make_pair(reported_epoch, reported_seq);
   }
 
+  void floor(int64_t f) {
+    stats.floor(f);
+    if (log_size < f)
+      log_size = f;
+    if (ondisk_log_size < f)
+      ondisk_log_size = f;
+  }
+
   void add(const pg_stat_t& o) {
     stats.add(o.stats);
     log_size += o.log_size;
@@ -989,11 +1090,19 @@ WRITE_CLASS_ENCODER(pg_stat_t)
  */
 struct pool_stat_t {
   object_stat_collection_t stats;
-  uint64_t log_size;
-  uint64_t ondisk_log_size;    // >= active_log_size
+  int64_t log_size;
+  int64_t ondisk_log_size;    // >= active_log_size
 
   pool_stat_t() : log_size(0), ondisk_log_size(0)
   { }
+
+  void floor(int64_t f) {
+    stats.floor(f);
+    if (log_size < f)
+      log_size = f;
+    if (ondisk_log_size < f)
+      ondisk_log_size = f;
+  }
 
   void add(const pg_stat_t& o) {
     stats.add(o.stats);

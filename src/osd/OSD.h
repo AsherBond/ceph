@@ -112,6 +112,8 @@ enum {
   l_osd_mape,
   l_osd_mape_dup,
 
+  l_osd_waiting_for_map,
+  l_osd_peering_latency,
   l_osd_last,
 };
 
@@ -146,6 +148,7 @@ class DeletingState {
   enum {
     QUEUED,
     CLEARING_DIR,
+    CLEARING_WAITING,
     DELETING_DIR,
     DELETED_DIR,
     CANCELED,
@@ -158,8 +161,23 @@ public:
     lock("DeletingState::lock"), status(QUEUED), stop_deleting(false),
     pgid(in.first), old_pg_state(in.second) {}
 
-  /// check whether removal was canceled
-  bool check_canceled() {
+  /// transition status to clearing
+  bool start_clearing() {
+    Mutex::Locker l(lock);
+    assert(
+      status == QUEUED ||
+      status == DELETED_DIR);
+    if (stop_deleting) {
+      status = CANCELED;
+      cond.Signal();
+      return false;
+    }
+    status = CLEARING_DIR;
+    return true;
+  } ///< @return false if we should cancel deletion
+
+  /// transition status to CLEARING_WAITING
+  bool pause_clearing() {
     Mutex::Locker l(lock);
     assert(status == CLEARING_DIR);
     if (stop_deleting) {
@@ -167,15 +185,14 @@ public:
       cond.Signal();
       return false;
     }
+    status = CLEARING_WAITING;
     return true;
-  } ///< @return false if canceled, true if we should continue
+  } ///< @return false if we should cancel deletion
 
-  /// transition status to clearing
-  bool start_clearing() {
+  /// transition status to CLEARING_DIR
+  bool resume_clearing() {
     Mutex::Locker l(lock);
-    assert(
-      status == QUEUED ||
-      status == DELETED_DIR);
+    assert(status == CLEARING_WAITING);
     if (stop_deleting) {
       status = CANCELED;
       cond.Signal();
@@ -213,11 +230,10 @@ public:
     /**
      * If we are in DELETING_DIR or CLEARING_DIR, there are in progress
      * operations we have to wait for before continuing on.  States
-     * DELETED_DIR, QUEUED, and CANCELED either check for stop_deleting
-     * prior to performing any operations or signify the end of the
-     * deleting process.  We don't want to wait to leave the QUEUED
-     * state, because this might block the caller behind an entire pg
-     * removal.
+     * CLEARING_WAITING and QUEUED indicate that the remover will check
+     * stop_deleting before queueing any further operations.  CANCELED
+     * indicates that the remover has already halted.  DELETED_DIR
+     * indicates that the deletion has been fully queueud.
      */
     while (status == DELETING_DIR || status == CLEARING_DIR)
       cond.Wait(lock);
@@ -901,10 +917,9 @@ private:
     list<PG*> peering_queue;
     OSD *osd;
     set<PG*> in_use;
-    const size_t batch_size;
-    PeeringWQ(OSD *o, time_t ti, ThreadPool *tp, size_t batch_size)
+    PeeringWQ(OSD *o, time_t ti, ThreadPool *tp)
       : ThreadPool::BatchWorkQueue<PG>(
-	"OSD::PeeringWQ", ti, ti*10, tp), osd(o), batch_size(batch_size) {}
+	"OSD::PeeringWQ", ti, ti*10, tp), osd(o) {}
 
     void _dequeue(PG *pg) {
       for (list<PG*>::iterator i = peering_queue.begin();
@@ -929,7 +944,8 @@ private:
     void _dequeue(list<PG*> *out) {
       set<PG*> got;
       for (list<PG*>::iterator i = peering_queue.begin();
-	   i != peering_queue.end() && out->size() < batch_size;
+	   i != peering_queue.end() &&
+	     out->size() < g_conf->osd_peering_wq_batch_size;
 	   ) {
 	if (in_use.count(*i)) {
 	  ++i;

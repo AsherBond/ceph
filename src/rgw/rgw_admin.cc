@@ -126,6 +126,8 @@ void _usage()
   cerr << "                               mdlog trim\n";
   cerr << "                               replica mdlog get/delete\n";
   cerr << "                               replica datalog get/delete\n";
+  cerr << "   --rgw-region=<region>     region in which radosgw is running\n";
+  cerr << "   --rgw-zone=<zone>         zone in which radosgw is running\n";
   cerr << "   --fix                     besides checking bucket index, will also fix it\n";
   cerr << "   --check-objects           bucket check: rebuilds bucket index according to\n";
   cerr << "                             actual objects state\n";
@@ -234,32 +236,31 @@ enum {
 static int get_cmd(const char *cmd, const char *prev_cmd, bool *need_more)
 {
   *need_more = false;
-  if (strcmp(cmd, "bucket") == 0 ||
+  // NOTE: please keep the checks in alphabetical order !!!
+  if (strcmp(cmd, "bilog") == 0 ||
+      strcmp(cmd, "bucket") == 0 ||
       strcmp(cmd, "buckets") == 0 ||
-      strcmp(cmd, "user") == 0 ||
       strcmp(cmd, "caps") == 0 ||
+      strcmp(cmd, "datalog") == 0 ||
       strcmp(cmd, "gc") == 0 || 
       strcmp(cmd, "key") == 0 ||
       strcmp(cmd, "log") == 0 ||
+      strcmp(cmd, "mdlog") == 0 ||
+      strcmp(cmd, "metadata") == 0 ||
       strcmp(cmd, "object") == 0 ||
+      strcmp(cmd, "opstate") == 0 ||
       strcmp(cmd, "pool") == 0 ||
       strcmp(cmd, "pools") == 0 ||
-      strcmp(cmd, "subuser") == 0 ||
-      strcmp(cmd, "temp") == 0 ||
-      strcmp(cmd, "usage") == 0 ||
-      strcmp(cmd, "user") == 0 ||
       strcmp(cmd, "region") == 0 ||
       strcmp(cmd, "regions") == 0 ||
       strcmp(cmd, "region-map") == 0 ||
       strcmp(cmd, "regionmap") == 0 ||
-      strcmp(cmd, "zone") == 0 ||
+      strcmp(cmd, "replicalog") == 0 ||
+      strcmp(cmd, "subuser") == 0 ||
       strcmp(cmd, "temp") == 0 ||
-      strcmp(cmd, "metadata") == 0 ||
-      strcmp(cmd, "mdlog") == 0 ||
-      strcmp(cmd, "bilog") == 0 ||
-      strcmp(cmd, "datalog") == 0 ||
-      strcmp(cmd, "opstate") == 0 ||
-      strcmp(cmd, "replicalog") == 0) {
+      strcmp(cmd, "usage") == 0 ||
+      strcmp(cmd, "user") == 0 ||
+      strcmp(cmd, "zone") == 0) {
     *need_more = true;
     return 0;
   }
@@ -1387,11 +1388,19 @@ int main(int argc, char **argv)
   }
 
   if (opt_cmd == OPT_BUCKET_LINK) {
-   RGWBucketAdminOp::link(store, bucket_op);
+    int r = RGWBucketAdminOp::link(store, bucket_op);
+    if (r < 0) {
+      cerr << "failure: " << cpp_strerror(-r) << std::endl;
+      return -r;
+    }
   }
 
   if (opt_cmd == OPT_BUCKET_UNLINK) {
-    RGWBucketAdminOp::unlink(store, bucket_op);
+    int r = RGWBucketAdminOp::unlink(store, bucket_op);
+    if (r < 0) {
+      cerr << "failure: " << cpp_strerror(-r) << std::endl;
+      return -r;
+    }
   }
 
   if (opt_cmd == OPT_TEMP_REMOVE) {
@@ -1766,9 +1775,7 @@ next:
 	cls_rgw_obj_chain& chain = info.chain;
 	for (liter = chain.objs.begin(); liter != chain.objs.end(); ++liter) {
 	  cls_rgw_obj& obj = *liter;
-	  formatter->dump_string("pool", obj.pool);
-	  formatter->dump_string("oid", obj.oid);
-	  formatter->dump_string("key", obj.key);
+          encode_json("obj", obj, formatter);
 	}
 	formatter->close_section(); // objs
 	formatter->close_section(); // obj_chain

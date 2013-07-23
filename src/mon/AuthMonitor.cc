@@ -718,6 +718,12 @@ bool AuthMonitor::prepare_command(MMonCommand *m)
 
   if (prefix == "auth import") {
     bufferlist bl = m->get_data();
+    if (bl.length() == 0) {
+      ss << "auth import: no data supplied";
+      getline(ss, rs);
+      mon->reply_command(m, -EINVAL, rs, get_last_committed());
+      return true;
+    }
     bufferlist::iterator iter = bl.begin();
     KeyRing keyring;
     try {
@@ -891,8 +897,8 @@ bool AuthMonitor::prepare_command(MMonCommand *m)
     KeyServerData::Incremental auth_inc;
     auth_inc.name = entity;
     if (!mon->key_server.contains(auth_inc.name)) {
-      ss << "couldn't find entry " << entity;
-      err = -ENOENT;
+      ss << "entity " << entity << " does not exist";
+      err = 0;
       goto done;
     }
     auth_inc.op = KeyServerData::AUTH_INC_DEL;
@@ -990,4 +996,14 @@ void AuthMonitor::upgrade_format()
     format_version = current;
     propose_pending();
   }
+}
+
+void AuthMonitor::dump_info(Formatter *f)
+{
+  /*** WARNING: do not include any privileged information here! ***/
+  f->open_object_section("auth");
+  f->dump_unsigned("first_committed", get_first_committed());
+  f->dump_unsigned("last_committed", get_last_committed());
+  f->dump_unsigned("num_secrets", mon->key_server.get_num_secrets());
+  f->close_section();
 }

@@ -118,6 +118,8 @@ def parse_cmdargs(args=None, target=''):
 
     parser.add_argument('--admin-daemon', dest='admin_socket',
                         help='submit admin-socket commands (\"help\" for help')
+    parser.add_argument('--admin-socket', dest='admin_socket_nope',
+                        help='you probably mean --admin-daemon')
 
     parser.add_argument('-s', '--status', action='store_true',
                         help='show cluster status')
@@ -142,8 +144,6 @@ def parse_cmdargs(args=None, target=''):
 
     parser.add_argument('-f', '--format', choices=['json', 'json-pretty',
                         'xml', 'xml-pretty', 'plain'], dest='output_format')
-    # for pg dump_stuck
-    parser.add_argument('--threshold', type=int, help='number of seconds for a pg to be considered stuck for pg dump_stuck')
 
     # returns a Namespace with the parsed args, and a list of all extras
     parsed_args, extras = parser.parse_known_args(args)
@@ -292,6 +292,8 @@ def admin_socket(asok_path, cmd):
         sock.sendall(' '.join(cmd) + '\0')
 
         len_str = sock.recv(4)
+        if len(len_str) < 4:
+            raise RuntimeError("no data returned from admin socket")
         l, = struct.unpack(">I", len_str)
         ret = ''
 
@@ -395,9 +397,9 @@ def find_cmd_target(childargs):
     right daemon.
     Returns ('osd', osdid), ('pg', pgid), or ('mon', '')
     """
-    sig = parse_funcsig(['tell', {'name':'target','type':'CephName'}])
+    sig = parse_funcsig(['tell', {'name':'target', 'type':'CephName'}])
     try:
-        valid_dict = validate(childargs, sig, partial=True);
+        valid_dict = validate(childargs, sig, partial=True)
         if len(valid_dict) == 2:
             name = CephName()
             name.valid(valid_dict['target'])
@@ -405,9 +407,9 @@ def find_cmd_target(childargs):
     except ArgumentError:
         pass
 
-    sig = parse_funcsig(['pg', {'name':'pgid','type':'CephPgid'}])
+    sig = parse_funcsig(['pg', {'name':'pgid', 'type':'CephPgid'}])
     try:
-        valid_dict = validate(childargs, sig, partial=True);
+        valid_dict = validate(childargs, sig, partial=True)
         if len(valid_dict) == 2:
             return 'pg', valid_dict['pgid']
     except ArgumentError:
@@ -488,6 +490,11 @@ def main():
 
     global verbose
     verbose = parsed_args.verbose
+
+    if parsed_args.admin_socket_nope:
+        print >> sys.stderr, '--admin-socket is used by daemons; '\
+        'you probably mean --admin-daemon/daemon'
+        return 1
 
     # pass on --id, --name, --conf
     name = 'client.admin'
@@ -582,7 +589,7 @@ def main():
     # implement -w/--watch_*
     # This is ugly, but Namespace() isn't quite rich enough.
     level = ''
-    for k,v in parsed_args._get_kwargs():
+    for k, v in parsed_args._get_kwargs():
         if k.startswith('watch') and v:
             if k == 'watch':
                 level = 'info'
@@ -670,8 +677,8 @@ def main():
         prefix = ''
         suffix = ''
         if not parsed_args.output_file and len(targets) > 1:
-            prefix='{0}.{1}: '.format(*target)
-            suffix='\n'
+            prefix = '{0}.{1}: '.format(*target)
+            suffix = '\n'
 
         ret, outbuf, outs = json_command(cluster_handle, target=target,
                                          prefix='get_command_descriptions')
@@ -683,8 +690,6 @@ def main():
             compat = True
             if parsed_args.output_format:
                 childargs.extend(['--format', parsed_args.output_format])
-            if parsed_args.threshold:
-                childargs.extend(['--threshold', parsed_args.threshold])
             ret, outbuf, outs = send_command(cluster_handle, target, childargs,
                                              inbuf)
         elif ret:
@@ -699,6 +704,15 @@ def main():
             ret, outbuf, outs = new_style_command(parsed_args, childargs, target,
                                                   sigdict, inbuf, verbose)
 
+            # debug tool: send any successful command *again* to
+            # verify that it is idempotent.
+            if not ret and 'CEPH_CLI_TEST_DUP_COMMAND' in os.environ:
+                ret, outbuf, outs = new_style_command(parsed_args, childargs, target,
+                                                      sigdict, inbuf, verbose)
+                if ret < 0:
+                    ret = -ret
+                    print >> sys.stderr, prefix + 'Second attempt of previously successful command failed with {0}: {1}'.format(errno.errorcode[ret], outs)
+
         if ret < 0:
             ret = -ret
             print >> sys.stderr, prefix + 'Error {0}: {1}'.format(errno.errorcode[ret], outs)
@@ -708,11 +722,12 @@ def main():
                 return ret
 
         # this assumes outs never has useful command output, only status
-        if outs:
-            if compat and ret == 0:
+        if compat:
+            if ret == 0:
                 # old cli/mon would send status string to stdout on non-error
                 print outs
-            else:
+        else:
+            if outs:
                 print >> sys.stderr, prefix + outs
 
         if (parsed_args.output_file):
@@ -725,7 +740,7 @@ def main():
             if parsed_args.output_format and \
                parsed_args.output_format.startswith('json') and \
                not compat:
-                sys.stdout.write('\n');
+                sys.stdout.write('\n')
 
             # if we are prettifying things, normalize newlines.  sigh.
             if suffix != '':

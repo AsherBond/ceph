@@ -1132,8 +1132,9 @@ void PG::activate(ObjectStore::Transaction& t,
   dirty_info = true;
   dirty_big_info = true; // maybe
 
-  // clean up stray objects
-  clean_up_local(t); 
+  // verify that there are no stray objects
+  if (is_primary())
+    check_local();
 
   // find out when we commit
   tfin.push_back(new C_PG_ActivateCommitted(this, query_epoch));
@@ -3328,7 +3329,7 @@ void PG::scrub(ThreadPool::TPHandle &handle)
       ConnectionRef con = osd->get_con_osd_cluster(acting[i], get_osdmap()->get_epoch());
       if (!con)
 	continue;
-      if (!(con->features & CEPH_FEATURE_CHUNKY_SCRUB)) {
+      if (!con->has_feature(CEPH_FEATURE_CHUNKY_SCRUB)) {
         dout(20) << "OSD " << acting[i]
                  << " does not support chunky scrubs, falling back to classic"
                  << dendl;
@@ -4510,7 +4511,8 @@ void PG::start_flush(ObjectStore::Transaction *t,
 /* Called before initializing peering during advance_map */
 void PG::start_peering_interval(const OSDMapRef lastmap,
 				const vector<int>& newup,
-				const vector<int>& newacting)
+				const vector<int>& newacting,
+				ObjectStore::Transaction *t)
 {
   const OSDMapRef osdmap = get_osdmap();
 
@@ -4599,7 +4601,7 @@ void PG::start_peering_interval(const OSDMapRef lastmap,
 
     
   // pg->on_*
-  on_change();
+  on_change(t);
 
   assert(!deleting);
 
@@ -5162,11 +5164,6 @@ PG::RecoveryState::Started::Started(my_context ctx)
 {
   state_name = "Started";
   context< RecoveryMachine >().log_enter(state_name);
-  PG *pg = context< RecoveryMachine >().pg;
-  pg->start_flush(
-    context< RecoveryMachine >().get_cur_transaction(),
-    context< RecoveryMachine >().get_on_applied_context_list(),
-    context< RecoveryMachine >().get_on_safe_context_list());
 }
 
 boost::statechart::result
@@ -5241,7 +5238,8 @@ boost::statechart::result PG::RecoveryState::Reset::react(const AdvMap& advmap)
     pg->is_split(advmap.lastmap, advmap.osdmap)) {
     dout(10) << "up or acting affected, calling start_peering_interval again"
 	     << dendl;
-    pg->start_peering_interval(advmap.lastmap, advmap.newup, advmap.newacting);
+    pg->start_peering_interval(advmap.lastmap, advmap.newup, advmap.newacting,
+			       context< RecoveryMachine >().get_cur_transaction());
   }
   return discard_event();
 }
@@ -5429,6 +5427,9 @@ void PG::RecoveryState::Peering::exit()
   PG *pg = context< RecoveryMachine >().pg;
   pg->state_clear(PG_STATE_PEERING);
   pg->clear_probe_targets();
+
+  utime_t dur = ceph_clock_now(g_ceph_context) - enter_time;
+  pg->osd->logger->tinc(l_osd_peering_latency, dur);
 }
 
 
@@ -5479,7 +5480,7 @@ PG::RecoveryState::WaitRemoteBackfillReserved::WaitRemoteBackfillReserved(my_con
   ConnectionRef con = pg->osd->get_con_osd_cluster(
     pg->backfill_target, pg->get_osdmap()->get_epoch());
   if (con) {
-    if ((con->features & CEPH_FEATURE_BACKFILL_RESERVATION)) {
+    if (con->has_feature(CEPH_FEATURE_BACKFILL_RESERVATION)) {
       unsigned priority = pg->is_degraded() ? OSDService::BACKFILL_HIGH
 	  : OSDService::BACKFILL_LOW;
       pg->osd->send_message_osd_cluster(
@@ -5735,7 +5736,7 @@ PG::RecoveryState::WaitRemoteRecoveryReserved::react(const RemoteRecoveryReserve
   if (acting_osd_it != context< Active >().sorted_acting_set.end()) {
     ConnectionRef con = pg->osd->get_con_osd_cluster(*acting_osd_it, pg->get_osdmap()->get_epoch());
     if (con) {
-      if ((con->features & CEPH_FEATURE_RECOVERY_RESERVATION)) {
+      if (con->has_feature(CEPH_FEATURE_RECOVERY_RESERVATION)) {
 	pg->osd->send_message_osd_cluster(
           new MRecoveryReserve(MRecoveryReserve::REQUEST,
 			       pg->info.pgid,
@@ -5783,7 +5784,7 @@ void PG::RecoveryState::Recovering::release_reservations()
       continue;
     ConnectionRef con = pg->osd->get_con_osd_cluster(*i, pg->get_osdmap()->get_epoch());
     if (con) {
-      if ((con->features & CEPH_FEATURE_RECOVERY_RESERVATION)) {
+      if (con->has_feature(CEPH_FEATURE_RECOVERY_RESERVATION)) {
 	pg->osd->send_message_osd_cluster(
           new MRecoveryReserve(MRecoveryReserve::RELEASE,
 			       pg->info.pgid,
@@ -6130,6 +6131,12 @@ PG::RecoveryState::ReplicaActive::ReplicaActive(my_context ctx)
   state_name = "Started/ReplicaActive";
 
   context< RecoveryMachine >().log_enter(state_name);
+
+  PG *pg = context< RecoveryMachine >().pg;
+  pg->start_flush(
+    context< RecoveryMachine >().get_cur_transaction(),
+    context< RecoveryMachine >().get_on_applied_context_list(),
+    context< RecoveryMachine >().get_on_safe_context_list());
 }
 
 
@@ -6218,6 +6225,11 @@ PG::RecoveryState::Stray::Stray(my_context ctx)
   assert(!pg->is_active());
   assert(!pg->is_peering());
   assert(!pg->is_primary());
+  if (!pg->is_replica()) // stray, need to flush for pulls
+    pg->start_flush(
+      context< RecoveryMachine >().get_cur_transaction(),
+      context< RecoveryMachine >().get_on_applied_context_list(),
+      context< RecoveryMachine >().get_on_safe_context_list());
 }
 
 boost::statechart::result PG::RecoveryState::Stray::react(const MLogRec& logevt)
@@ -6564,6 +6576,10 @@ boost::statechart::result PG::RecoveryState::GetLog::react(const GotLog&)
 			msg->info, msg->log, msg->missing, 
 			newest_update_osd);
   }
+  pg->start_flush(
+    context< RecoveryMachine >().get_cur_transaction(),
+    context< RecoveryMachine >().get_on_applied_context_list(),
+    context< RecoveryMachine >().get_on_safe_context_list());
   return transit< GetMissing >();
 }
 
@@ -6880,14 +6896,14 @@ void PG::RecoveryState::WaitUpThru::exit()
 
 void PG::RecoveryState::RecoveryMachine::log_enter(const char *state_name)
 {
-  dout(20) << "enter " << state_name << dendl;
+  dout(5) << "enter " << state_name << dendl;
   pg->osd->pg_recovery_stats.log_enter(state_name);
 }
 
 void PG::RecoveryState::RecoveryMachine::log_exit(const char *state_name, utime_t enter_time)
 {
   utime_t dur = ceph_clock_now(g_ceph_context) - enter_time;
-  dout(20) << "exit " << state_name << " " << dur << " " << event_count << " " << event_time << dendl;
+  dout(5) << "exit " << state_name << " " << dur << " " << event_count << " " << event_time << dendl;
   pg->osd->pg_recovery_stats.log_exit(state_name, ceph_clock_now(g_ceph_context) - enter_time,
 				      event_count, event_time);
   event_count = 0;

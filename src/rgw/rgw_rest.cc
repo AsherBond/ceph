@@ -835,8 +835,10 @@ int rgw_rest_read_all_input(struct req_state *s, char **pdata, int *plen, int ma
        return -ENOMEM;
     }
     int ret = s->cio->read(data, cl, &len);
-    if (ret < 0)
+    if (ret < 0) {
+      free(data);
       return ret;
+    }
     data[len] = '\0';
   } else if (!s->length) {
     const char *encoding = s->info.env->get("HTTP_TRANSFER_ENCODING");
@@ -1240,7 +1242,7 @@ RGWHandler *RGWREST::get_handler(RGWRados *store, struct req_state *s, RGWClient
   if (*init_error < 0)
     return NULL;
 
-  RGWRESTMgr *m = mgr.get_resource_mgr(s, s->decoded_uri, &s->effective_uri);
+  RGWRESTMgr *m = mgr.get_resource_mgr(s, s->decoded_uri, &s->relative_uri);
   if (!m) {
     *init_error = -ERR_METHOD_NOT_ALLOWED;
     return NULL;

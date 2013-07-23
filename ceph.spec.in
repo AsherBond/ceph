@@ -146,6 +146,7 @@ managers such as Pacemaker.
 Summary:	RADOS distributed object store client library
 Group:		System Environment/Libraries
 License:	LGPL-2.0
+Obsoletes:	ceph-libs
 %description -n librados2
 RADOS is a reliable, autonomic distributed object storage cluster
 developed as part of the Ceph distributed storage system. This is a
@@ -156,6 +157,7 @@ store using a simple file-like interface.
 Summary:	RADOS block device client library
 Group:		System Environment/Libraries
 License:	LGPL-2.0
+Obsoletes:	ceph-libs
 %description -n librbd1
 RBD is a block device striped across multiple distributed objects in
 RADOS, a reliable, autonomic distributed object storage cluster
@@ -166,6 +168,7 @@ shared library allowing applications to manage these block devices.
 Summary:	Ceph distributed file system client library
 Group:		System Environment/Libraries
 License:	LGPL-2.0
+Obsoletes:	ceph-libs
 %description -n libcephfs1
 Ceph is a distributed network file system designed to provide excellent
 performance, reliability, and scalability. This is a shared library
@@ -378,6 +381,7 @@ fi
 %{_bindir}/ceph-osd
 %{_bindir}/ceph-rbdnamer
 %{_bindir}/ceph-dencoder
+%{_bindir}/ceph-rest-api
 %{_bindir}/librados-config
 %{_bindir}/rados
 %{_bindir}/rbd
@@ -423,6 +427,7 @@ fi
 %{_mandir}/man8/ceph-run.8*
 %{_mandir}/man8/ceph-syn.8*
 %{_mandir}/man8/ceph-dencoder.8*
+%{_mandir}/man8/ceph-rest-api.8*
 %{_mandir}/man8/crushtool.8*
 %{_mandir}/man8/osdmaptool.8*
 %{_mandir}/man8/monmaptool.8*
@@ -562,6 +567,7 @@ fi
 %{python_sitelib}/rbd.py*
 %{python_sitelib}/cephfs.py*
 %{python_sitelib}/ceph_argparse.py*
+%{python_sitelib}/ceph_rest_api.py*
 
 #################################################################################
 %files -n rest-bench

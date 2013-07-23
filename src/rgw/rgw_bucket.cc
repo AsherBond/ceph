@@ -93,8 +93,10 @@ int rgw_link_bucket(RGWRados *store, string user_id, rgw_bucket& bucket, time_t 
     new_bucket.creation_time = creation_time;
   ::encode(new_bucket, bl);
 
+  map<string, bufferlist> attrs;
+
   if (update_entrypoint) {
-    ret = store->get_bucket_entrypoint_info(NULL, bucket_name, ep, &ot, NULL);
+    ret = store->get_bucket_entrypoint_info(NULL, bucket_name, ep, &ot, NULL, &attrs);
     if (ret < 0 && ret != -ENOENT) {
       ldout(store->ctx(), 0) << "ERROR: store->get_bucket_entrypoint_info() returned " << ret << dendl;
     } else if (ret >= 0 && ep.linked && ep.owner != user_id) {
@@ -115,11 +117,11 @@ int rgw_link_bucket(RGWRados *store, string user_id, rgw_bucket& bucket, time_t 
   }
 
   if (!update_entrypoint)
-    return false;
+    return 0;
 
   ep.linked = true;
   ep.owner = user_id;
-  ret = store->put_bucket_entrypoint_info(bucket_name, ep, false, ot, 0);
+  ret = store->put_bucket_entrypoint_info(bucket_name, ep, false, ot, 0, &attrs);
   if (ret < 0)
     goto done_err;
 
@@ -149,11 +151,12 @@ int rgw_unlink_bucket(RGWRados *store, string user_id, const string& bucket_name
   }
 
   if (!update_entrypoint)
-    return false;
+    return 0;
 
   RGWBucketEntryPoint ep;
   RGWObjVersionTracker ot;
-  ret = store->get_bucket_entrypoint_info(NULL, bucket_name, ep, &ot, NULL);
+  map<string, bufferlist> attrs;
+  ret = store->get_bucket_entrypoint_info(NULL, bucket_name, ep, &ot, NULL, &attrs);
   if (ret == -ENOENT)
     return 0;
   if (ret < 0)
@@ -168,7 +171,7 @@ int rgw_unlink_bucket(RGWRados *store, string user_id, const string& bucket_name
   }
 
   ep.linked = false;
-  ret = store->put_bucket_entrypoint_info(bucket_name, ep, false, ot, 0);
+  ret = store->put_bucket_entrypoint_info(bucket_name, ep, false, ot, 0, &attrs);
   if (ret < 0)
     return ret;
 
@@ -416,7 +419,6 @@ int RGWBucket::link(RGWBucketAdminOpState& op_state, std::string *err_msg)
   std::string display_name = op_state.get_user_display_name();
   rgw_bucket bucket = op_state.get_bucket();
 
-  string uid_str(user_info.user_id);
   rgw_obj obj(bucket, no_oid);
   RGWObjVersionTracker objv_tracker;
 
@@ -718,7 +720,7 @@ int RGWBucket::get_policy(RGWBucketAdminOpState& op_state, ostream& o)
 
   bufferlist bl;
   rgw_obj obj(bucket, object_name);
-  int ret = store->get_attr(NULL, obj, RGW_ATTR_ACL, bl, NULL);
+  int ret = store->get_attr(NULL, obj, RGW_ATTR_ACL, bl);
   if (ret < 0)
     return ret;
 
@@ -1382,8 +1384,9 @@ public:
     RGWBucketEntryPoint be;
 
     time_t mtime;
+    map<string, bufferlist> attrs;
 
-    int ret = store->get_bucket_entrypoint_info(NULL, entry, be, &ot, &mtime);
+    int ret = store->get_bucket_entrypoint_info(NULL, entry, be, &ot, &mtime, &attrs);
     if (ret < 0)
       return ret;
 
@@ -1399,16 +1402,17 @@ public:
     decode_json_obj(be, obj);
 
     time_t orig_mtime;
+    map<string, bufferlist> attrs;
 
     RGWObjVersionTracker old_ot;
 
-    int ret = store->get_bucket_entrypoint_info(NULL, entry, old_be, &old_ot, &orig_mtime);
+    int ret = store->get_bucket_entrypoint_info(NULL, entry, old_be, &old_ot, &orig_mtime, &attrs);
     if (ret < 0 && ret != -ENOENT)
       return ret;
 
     objv_tracker.read_version = old_ot.read_version; /* maintain the obj version we just read */
 
-    ret = store->put_bucket_entrypoint_info(entry, be, false, objv_tracker, mtime);
+    ret = store->put_bucket_entrypoint_info(entry, be, false, objv_tracker, mtime, &attrs);
     if (ret < 0)
       return ret;
 
@@ -1419,7 +1423,7 @@ public:
       ret = rgw_unlink_bucket(store, be.owner, be.bucket.name, false);
     }
 
-    return 0;
+    return ret;
   }
 
   struct list_keys_info {
@@ -1430,7 +1434,7 @@ public:
   int remove(RGWRados *store, string& entry, RGWObjVersionTracker& objv_tracker) {
     RGWBucketEntryPoint be;
 
-    int ret = store->get_bucket_entrypoint_info(NULL, entry, be, &objv_tracker, NULL);
+    int ret = store->get_bucket_entrypoint_info(NULL, entry, be, &objv_tracker, NULL, NULL);
     if (ret < 0)
       return ret;
 
@@ -1464,7 +1468,7 @@ public:
   }
 
   int list_keys_next(void *handle, int max, list<string>& keys, bool *truncated) {
-    list_keys_info *info = (list_keys_info *)handle;
+    list_keys_info *info = static_cast<list_keys_info *>(handle);
 
     string no_filter;
 
@@ -1476,8 +1480,13 @@ public:
 
     int ret = store->list_raw_objects(store->zone.domain_root, no_filter,
                                       max, info->ctx, unfiltered_keys, truncated);
-    if (ret < 0)
+    if (ret < 0 && ret != -ENOENT)
       return ret;
+    if (ret == -ENOENT) {
+      if (truncated)
+        *truncated = false;
+      return 0;
+    }
 
     // now filter out the system entries
     list<string>::iterator iter;
@@ -1493,7 +1502,7 @@ public:
   }
 
   void list_keys_complete(void *handle) {
-    list_keys_info *info = (list_keys_info *)handle;
+    list_keys_info *info = static_cast<list_keys_info *>(handle);
     delete info;
   }
 };
@@ -1606,7 +1615,7 @@ public:
   }
 
   int list_keys_next(void *handle, int max, list<string>& keys, bool *truncated) {
-    list_keys_info *info = (list_keys_info *)handle;
+    list_keys_info *info = static_cast<list_keys_info *>(handle);
 
     string no_filter;
 
@@ -1618,8 +1627,13 @@ public:
 
     int ret = store->list_raw_objects(store->zone.domain_root, no_filter,
                                       max, info->ctx, unfiltered_keys, truncated);
-    if (ret < 0)
+    if (ret < 0 && ret != -ENOENT)
       return ret;
+    if (ret == -ENOENT) {
+      if (truncated)
+        *truncated = false;
+      return 0;
+    }
 
     int prefix_size = sizeof(RGW_BUCKET_INSTANCE_MD_PREFIX) - 1;
     // now filter in the relevant entries
@@ -1636,7 +1650,7 @@ public:
   }
 
   void list_keys_complete(void *handle) {
-    list_keys_info *info = (list_keys_info *)handle;
+    list_keys_info *info = static_cast<list_keys_info *>(handle);
     delete info;
   }
 

@@ -164,7 +164,7 @@ Generate a key so that RADOS Gateway can identify a user name and authenticate
 the user with the cluster. Then, add capabilities to the key. For example:: 
 
 	sudo ceph-authtool /etc/ceph/keyring.radosgw.gateway -n client.radosgw.gateway --gen-key
-	sudo ceph-authtool -n client.radosgw.gateway --cap osd 'allow rwx' --cap mon 'allow r' /etc/ceph/keyring.radosgw.gateway
+	sudo ceph-authtool -n client.radosgw.gateway --cap osd 'allow rwx' --cap mon 'allow rw' /etc/ceph/keyring.radosgw.gateway
 	
 
 Add to Ceph Keyring Entries 
@@ -173,7 +173,7 @@ Add to Ceph Keyring Entries
 Once you have created a keyring and key for RADOS GW, add it as an entry in
 the Ceph keyring. For example::
 
-	sudo ceph -k /etc/ceph/ceph.keyring auth add client.radosgw.gateway -i /etc/ceph/keyring.radosgw.gateway
+	sudo ceph -k /etc/ceph/ceph.client.admin.keyring auth add client.radosgw.gateway -i /etc/ceph/keyring.radosgw.gateway
 	
 
 Restart Services and Start the RADOS Gateway

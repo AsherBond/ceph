@@ -290,8 +290,9 @@ private:
    */
   version_t accepted_pn;
   /**
-   * @todo This has something to do with the last_committed version. Not sure
-   *	   about what it entails, tbh.
+   * The last_committed epoch of the leader at the time we accepted the last pn.
+   *
+   * This has NO SEMANTIC MEANING, and is there only for the debug output.
    */
   version_t accepted_pn_from;
   /**
@@ -983,7 +984,19 @@ private:
    * Begin proposing the Proposal at the front of the proposals queue.
    */
   void propose_queued();
-  void finish_proposal();
+
+  /**
+   * refresh state from store
+   *
+   * Called when we have new state for the mon to consume.  If we return false,
+   * abort (we triggered a bootstrap).
+   *
+   * @returns true on success, false if we are now bootstrapping
+   */
+  bool do_refresh();
+
+  void commit_proposal();
+  void finish_round();
 
 public:
   /**
@@ -1018,6 +1031,12 @@ public:
   void read_and_prepare_transactions(MonitorDBStore::Transaction *tx, version_t from, version_t last);
 
   void init();
+
+  /**
+   * dump state info to a formatter
+   */
+  void dump_info(Formatter *f);
+
   /**
    * This function runs basic consistency checks. Importantly, if
    * it is inconsistent and shouldn't be, it asserts out.
@@ -1096,7 +1115,7 @@ public:
    * @param t The transaction to which we will append the operations
    * @param bl A bufferlist containing an encoded transaction
    */
-  void decode_append_transaction(MonitorDBStore::Transaction& t,
+  static void decode_append_transaction(MonitorDBStore::Transaction& t,
 				 bufferlist& bl) {
     MonitorDBStore::Transaction vt;
     bufferlist::iterator it = bl.begin();

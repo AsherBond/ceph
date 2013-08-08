@@ -295,6 +295,7 @@ void Objecter::send_linger(LingerOp *info)
     // repeat send.  cancel old registeration op, if any.
     if (ops.count(info->register_tid)) {
       Op *o = ops[info->register_tid];
+      op_cancel_map_check(o);
       cancel_op(o);
     }
     info->register_tid = _op_submit(o);
@@ -746,6 +747,7 @@ void Objecter::check_op_pool_dne(Op *op)
 
 void Objecter::_send_op_map_check(Op *op)
 {
+  assert(client_lock.is_locked());
   // ask the monitor
   if (check_latest_map_ops.count(op->tid) == 0) {
     check_latest_map_ops[op->tid] = op;
@@ -756,6 +758,7 @@ void Objecter::_send_op_map_check(Op *op)
 
 void Objecter::op_cancel_map_check(Op *op)
 {
+  assert(client_lock.is_locked());
   map<tid_t, Op*>::iterator iter =
     check_latest_map_ops.find(op->tid);
   if (iter != check_latest_map_ops.end()) {
@@ -1098,6 +1101,7 @@ void Objecter::tick()
 
 void Objecter::resend_mon_ops()
 {
+  assert(client_lock.is_locked());
   ldout(cct, 10) << "resend_mon_ops" << dendl;
 
   for (map<tid_t,PoolStatOp*>::iterator p = poolstat_ops.begin(); p!=poolstat_ops.end(); ++p) {
@@ -1397,6 +1401,7 @@ void Objecter::finish_op(Op *op)
 
   ops.erase(op->tid);
   logger->set(l_osdc_op_active, ops.size());
+  assert(check_latest_map_ops.find(op->tid) == check_latest_map_ops.end());
 
   delete op;
 }
@@ -2166,154 +2171,154 @@ void Objecter::dump_active()
   }
 }
 
-void Objecter::dump_requests(Formatter& fmt) const
+void Objecter::dump_requests(Formatter *fmt) const
 {
   assert(client_lock.is_locked());
 
-  fmt.open_object_section("requests");
+  fmt->open_object_section("requests");
   dump_ops(fmt);
   dump_linger_ops(fmt);
   dump_pool_ops(fmt);
   dump_pool_stat_ops(fmt);
   dump_statfs_ops(fmt);
   dump_command_ops(fmt);
-  fmt.close_section(); // requests object
+  fmt->close_section(); // requests object
 }
 
-void Objecter::dump_ops(Formatter& fmt) const
+void Objecter::dump_ops(Formatter *fmt) const
 {
-  fmt.open_array_section("ops");
+  fmt->open_array_section("ops");
   for (map<tid_t,Op*>::const_iterator p = ops.begin();
        p != ops.end();
        ++p) {
     Op *op = p->second;
-    fmt.open_object_section("op");
-    fmt.dump_unsigned("tid", op->tid);
-    fmt.dump_stream("pg") << op->pgid;
-    fmt.dump_int("osd", op->session ? op->session->osd : -1);
-    fmt.dump_stream("last_sent") << op->stamp;
-    fmt.dump_int("attempts", op->attempts);
-    fmt.dump_stream("object_id") << op->oid;
-    fmt.dump_stream("object_locator") << op->oloc;
-    fmt.dump_stream("snapid") << op->snapid;
-    fmt.dump_stream("snap_context") << op->snapc;
-    fmt.dump_stream("mtime") << op->mtime;
+    fmt->open_object_section("op");
+    fmt->dump_unsigned("tid", op->tid);
+    fmt->dump_stream("pg") << op->pgid;
+    fmt->dump_int("osd", op->session ? op->session->osd : -1);
+    fmt->dump_stream("last_sent") << op->stamp;
+    fmt->dump_int("attempts", op->attempts);
+    fmt->dump_stream("object_id") << op->oid;
+    fmt->dump_stream("object_locator") << op->oloc;
+    fmt->dump_stream("snapid") << op->snapid;
+    fmt->dump_stream("snap_context") << op->snapc;
+    fmt->dump_stream("mtime") << op->mtime;
 
-    fmt.open_array_section("osd_ops");
+    fmt->open_array_section("osd_ops");
     for (vector<OSDOp>::const_iterator it = op->ops.begin();
 	 it != op->ops.end();
 	 ++it) {
-      fmt.dump_stream("osd_op") << *it;
+      fmt->dump_stream("osd_op") << *it;
     }
-    fmt.close_section(); // osd_ops array
+    fmt->close_section(); // osd_ops array
 
-    fmt.close_section(); // op object
+    fmt->close_section(); // op object
   }
-  fmt.close_section(); // ops array
+  fmt->close_section(); // ops array
 }
 
-void Objecter::dump_linger_ops(Formatter& fmt) const
+void Objecter::dump_linger_ops(Formatter *fmt) const
 {
-  fmt.open_array_section("linger_ops");
+  fmt->open_array_section("linger_ops");
   for (map<uint64_t, LingerOp*>::const_iterator p = linger_ops.begin();
        p != linger_ops.end();
        ++p) {
     LingerOp *op = p->second;
-    fmt.open_object_section("linger_op");
-    fmt.dump_unsigned("linger_id", op->linger_id);
-    fmt.dump_stream("pg") << op->pgid;
-    fmt.dump_int("osd", op->session ? op->session->osd : -1);
-    fmt.dump_stream("object_id") << op->oid;
-    fmt.dump_stream("object_locator") << op->oloc;
-    fmt.dump_stream("snapid") << op->snap;
-    fmt.dump_stream("registering") << op->snap;
-    fmt.dump_stream("registered") << op->snap;
-    fmt.close_section(); // linger_op object
+    fmt->open_object_section("linger_op");
+    fmt->dump_unsigned("linger_id", op->linger_id);
+    fmt->dump_stream("pg") << op->pgid;
+    fmt->dump_int("osd", op->session ? op->session->osd : -1);
+    fmt->dump_stream("object_id") << op->oid;
+    fmt->dump_stream("object_locator") << op->oloc;
+    fmt->dump_stream("snapid") << op->snap;
+    fmt->dump_stream("registering") << op->snap;
+    fmt->dump_stream("registered") << op->snap;
+    fmt->close_section(); // linger_op object
   }
-  fmt.close_section(); // linger_ops array
+  fmt->close_section(); // linger_ops array
 }
 
-void Objecter::dump_command_ops(Formatter& fmt) const
+void Objecter::dump_command_ops(Formatter *fmt) const
 {
-  fmt.open_array_section("command_ops");
+  fmt->open_array_section("command_ops");
   for (map<uint64_t, CommandOp*>::const_iterator p = command_ops.begin();
        p != command_ops.end();
        ++p) {
     CommandOp *op = p->second;
-    fmt.open_object_section("command_op");
-    fmt.dump_unsigned("command_id", op->tid);
-    fmt.dump_int("osd", op->session ? op->session->osd : -1);
-    fmt.open_array_section("command");
+    fmt->open_object_section("command_op");
+    fmt->dump_unsigned("command_id", op->tid);
+    fmt->dump_int("osd", op->session ? op->session->osd : -1);
+    fmt->open_array_section("command");
     for (vector<string>::const_iterator q = op->cmd.begin(); q != op->cmd.end(); ++q)
-      fmt.dump_string("word", *q);
-    fmt.close_section();
+      fmt->dump_string("word", *q);
+    fmt->close_section();
     if (op->target_osd >= 0)
-      fmt.dump_int("target_osd", op->target_osd);
+      fmt->dump_int("target_osd", op->target_osd);
     else
-      fmt.dump_stream("target_pg") << op->target_pg;
-    fmt.close_section(); // command_op object
+      fmt->dump_stream("target_pg") << op->target_pg;
+    fmt->close_section(); // command_op object
   }
-  fmt.close_section(); // command_ops array
+  fmt->close_section(); // command_ops array
 }
 
-void Objecter::dump_pool_ops(Formatter& fmt) const
+void Objecter::dump_pool_ops(Formatter *fmt) const
 {
-  fmt.open_array_section("pool_ops");
+  fmt->open_array_section("pool_ops");
   for (map<tid_t, PoolOp*>::const_iterator p = pool_ops.begin();
        p != pool_ops.end();
        ++p) {
     PoolOp *op = p->second;
-    fmt.open_object_section("pool_op");
-    fmt.dump_unsigned("tid", op->tid);
-    fmt.dump_int("pool", op->pool);
-    fmt.dump_string("name", op->name);
-    fmt.dump_int("operation_type", op->pool_op);
-    fmt.dump_unsigned("auid", op->auid);
-    fmt.dump_unsigned("crush_rule", op->crush_rule);
-    fmt.dump_stream("snapid") << op->snapid;
-    fmt.dump_stream("last_sent") << op->last_submit;
-    fmt.close_section(); // pool_op object
+    fmt->open_object_section("pool_op");
+    fmt->dump_unsigned("tid", op->tid);
+    fmt->dump_int("pool", op->pool);
+    fmt->dump_string("name", op->name);
+    fmt->dump_int("operation_type", op->pool_op);
+    fmt->dump_unsigned("auid", op->auid);
+    fmt->dump_unsigned("crush_rule", op->crush_rule);
+    fmt->dump_stream("snapid") << op->snapid;
+    fmt->dump_stream("last_sent") << op->last_submit;
+    fmt->close_section(); // pool_op object
   }
-  fmt.close_section(); // pool_ops array
+  fmt->close_section(); // pool_ops array
 }
 
-void Objecter::dump_pool_stat_ops(Formatter& fmt) const
+void Objecter::dump_pool_stat_ops(Formatter *fmt) const
 {
-  fmt.open_array_section("pool_stat_ops");
+  fmt->open_array_section("pool_stat_ops");
   for (map<tid_t, PoolStatOp*>::const_iterator p = poolstat_ops.begin();
        p != poolstat_ops.end();
        ++p) {
     PoolStatOp *op = p->second;
-    fmt.open_object_section("pool_stat_op");
-    fmt.dump_unsigned("tid", op->tid);
-    fmt.dump_stream("last_sent") << op->last_submit;
+    fmt->open_object_section("pool_stat_op");
+    fmt->dump_unsigned("tid", op->tid);
+    fmt->dump_stream("last_sent") << op->last_submit;
 
-    fmt.open_array_section("pools");
+    fmt->open_array_section("pools");
     for (list<string>::const_iterator it = op->pools.begin();
 	 it != op->pools.end();
 	 ++it) {
-      fmt.dump_string("pool", *it);
+      fmt->dump_string("pool", *it);
     }
-    fmt.close_section(); // pool_op object
+    fmt->close_section(); // pool_op object
 
-    fmt.close_section(); // pool_stat_op object
+    fmt->close_section(); // pool_stat_op object
   }
-  fmt.close_section(); // pool_stat_ops array
+  fmt->close_section(); // pool_stat_ops array
 }
 
-void Objecter::dump_statfs_ops(Formatter& fmt) const
+void Objecter::dump_statfs_ops(Formatter *fmt) const
 {
-  fmt.open_array_section("statfs_ops");
+  fmt->open_array_section("statfs_ops");
   for (map<tid_t, StatfsOp*>::const_iterator p = statfs_ops.begin();
        p != statfs_ops.end();
        ++p) {
     StatfsOp *op = p->second;
-    fmt.open_object_section("statfs_op");
-    fmt.dump_unsigned("tid", op->tid);
-    fmt.dump_stream("last_sent") << op->last_submit;
-    fmt.close_section(); // pool_stat_op object
+    fmt->open_object_section("statfs_op");
+    fmt->dump_unsigned("tid", op->tid);
+    fmt->dump_stream("last_sent") << op->last_submit;
+    fmt->close_section(); // pool_stat_op object
   }
-  fmt.close_section(); // pool_stat_ops array
+  fmt->close_section(); // pool_stat_ops array
 }
 
 Objecter::RequestStateHook::RequestStateHook(Objecter *objecter) :
@@ -2321,14 +2326,16 @@ Objecter::RequestStateHook::RequestStateHook(Objecter *objecter) :
 {
 }
 
-bool Objecter::RequestStateHook::call(std::string command, std::string args, bufferlist& out)
+bool Objecter::RequestStateHook::call(std::string command, cmdmap_t& cmdmap,
+				      std::string format, bufferlist& out)
 {
   stringstream ss;
-  JSONFormatter formatter(true);
+  Formatter *f = new_formatter(format);
   m_objecter->client_lock.Lock();
-  m_objecter->dump_requests(formatter);
+  m_objecter->dump_requests(f);
   m_objecter->client_lock.Unlock();
-  formatter.flush(ss);
+  f->flush(ss);
+  delete f;
   out.append(ss);
   return true;
 }
@@ -2434,6 +2441,7 @@ int Objecter::recalc_command_target(CommandOp *c)
       c->session = s;
       s->command_ops.push_back(&c->session_item);
     } else {
+      c->session = NULL;
       num_homeless_ops++;
     }
     return RECALC_OP_TARGET_NEED_RESEND;

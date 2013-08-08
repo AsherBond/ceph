@@ -255,6 +255,12 @@ void PGMonitor::update_from_paxos(bool *need_bootstrap)
   update_logger();
 }
 
+void PGMonitor::on_upgrade()
+{
+  dout(1) << __func__ << " discarding in-core PGMap" << dendl;
+  pg_map = PGMap();
+}
+
 void PGMonitor::upgrade_format()
 {
   unsigned current = 1;
@@ -1326,12 +1332,16 @@ bool PGMonitor::preprocess_command(MMonCommand *m)
 
   // perhaps these would be better in the parsing, but it's weird
   if (prefix == "pg dump_json") {
+    vector<string> v;
+    v.push_back(string("all"));
     cmd_putval(g_ceph_context, cmdmap, "format", string("json"));
-    cmd_putval(g_ceph_context, cmdmap, "dumpcontents", string("all"));
+    cmd_putval(g_ceph_context, cmdmap, "dumpcontents", v);
     prefix = "pg dump";
   } else if (prefix == "pg dump_pools_json") {
+    vector<string> v;
+    v.push_back(string("pools"));
     cmd_putval(g_ceph_context, cmdmap, "format", string("json"));
-    cmd_putval(g_ceph_context, cmdmap, "dumpcontents", string("pool"));
+    cmd_putval(g_ceph_context, cmdmap, "dumpcontents", v);
     prefix = "pg dump";
   }
 

@@ -143,6 +143,7 @@ Monitor::Monitor(CephContext* cct_, string nm, MonitorDBStore *s,
   elector(this),
   leader(0),
   quorum_features(0),
+  scrub_version(0),
 
   // sync state
   sync_provider_count(0),
@@ -224,21 +225,20 @@ class AdminHook : public AdminSocketHook {
   Monitor *mon;
 public:
   AdminHook(Monitor *m) : mon(m) {}
-  bool call(std::string command, std::string args, bufferlist& out) {
+  bool call(std::string command, cmdmap_t& cmdmap, std::string format,
+	    bufferlist& out) {
     stringstream ss;
-    mon->do_admin_command(command, args, ss);
+    mon->do_admin_command(command, cmdmap, format, ss);
     out.append(ss);
     return true;
   }
 };
 
-void Monitor::do_admin_command(string command, string args, ostream& ss)
+void Monitor::do_admin_command(string command, cmdmap_t& cmdmap, string format,
+			       ostream& ss)
 {
   Mutex::Locker l(lock);
 
-  map<string, cmd_vartype> cmdmap;
-  string format;
-  cmd_getval(g_ceph_context, cmdmap, "format", format, string("plain"));
   boost::scoped_ptr<Formatter> f(new_formatter(format));
 
   if (command == "mon_status")
@@ -246,7 +246,9 @@ void Monitor::do_admin_command(string command, string args, ostream& ss)
   else if (command == "quorum_status")
     _quorum_status(f.get(), ss);
   else if (command == "sync_force") {
-    if (args != "--yes-i-really-mean-it") {
+    string validate;
+    if ((!cmd_getval(g_ceph_context, cmdmap, "validate", validate)) ||
+	(validate != "--yes-i-really-mean-it")) {
       ss << "are you SURE? this will mean the monitor store will be erased "
             "the next time the monitor is restarted.  pass "
             "'--yes-i-really-mean-it' if you really do.";
@@ -254,7 +256,7 @@ void Monitor::do_admin_command(string command, string args, ostream& ss)
     }
     sync_force(f.get(), ss);
   } else if (command.find("add_bootstrap_peer_hint") == 0)
-    _add_bootstrap_peer_hint(command, args, ss);
+    _add_bootstrap_peer_hint(command, cmdmap, ss);
   else
     assert(0 == "bad AdminSocket command binding");
 }
@@ -485,10 +487,19 @@ int Monitor::preinit()
   r = admin_socket->register_command("quorum_status", "quorum_status",
 				     admin_hook, "show current quorum status");
   assert(r == 0);
-  r = admin_socket->register_command("add_bootstrap_peer_hint",
-				     "add_bootstrap_peer_hint name=addr,type=CephIPAddr",
+  r = admin_socket->register_command("sync_force",
+				     "sync_force name=validate,"
+				     "type=CephChoices,"
+			             "strings=--yes-i-really-mean-it",
 				     admin_hook,
-				     "add peer address as potential bootstrap peer for cluster bringup");
+				     "force sync of and clear monitor store");
+  assert(r == 0);
+  r = admin_socket->register_command("add_bootstrap_peer_hint",
+				     "add_bootstrap_peer_hint name=addr,"
+				     "type=CephIPAddr",
+				     admin_hook,
+				     "add peer address as potential bootstrap"
+				     " peer for cluster bringup");
   assert(r == 0);
   lock.Lock();
 
@@ -577,6 +588,7 @@ void Monitor::shutdown()
     AdminSocket* admin_socket = cct->get_admin_socket();
     admin_socket->unregister_command("mon_status");
     admin_socket->unregister_command("quorum_status");
+    admin_socket->unregister_command("sync_force");
     admin_socket->unregister_command("add_bootstrap_peer_hint");
     delete admin_hook;
     admin_hook = NULL;
@@ -619,7 +631,7 @@ void Monitor::bootstrap()
 {
   dout(10) << "bootstrap" << dendl;
 
-  sync_reset();
+  sync_reset_requester();
   unregister_cluster_logger();
   cancel_probe_timeout();
 
@@ -684,14 +696,17 @@ void Monitor::bootstrap()
   }
 }
 
-void Monitor::_add_bootstrap_peer_hint(string cmd, string args, ostream& ss)
+void Monitor::_add_bootstrap_peer_hint(string cmd, cmdmap_t& cmdmap, ostream& ss)
 {
-  dout(10) << "_add_bootstrap_peer_hint '" << cmd << "' '" << args << "'" << dendl;
+  string addrstr;
+  cmd_getval(g_ceph_context, cmdmap, "addr", addrstr);
+  dout(10) << "_add_bootstrap_peer_hint '" << cmd << "' '"
+           << addrstr << "'" << dendl;
 
   entity_addr_t addr;
   const char *end = 0;
-  if (!addr.parse(args.c_str(), &end)) {
-    ss << "failed to parse addr '" << args << "'; syntax is 'add_bootstrap_peer_hint ip[:port]'";
+  if (!addr.parse(addrstr.c_str(), &end)) {
+    ss << "failed to parse addr '" << addrstr << "'; syntax is 'add_bootstrap_peer_hint ip[:port]'";
     return;
   }
 
@@ -806,21 +821,25 @@ void Monitor::sync_obtain_latest_monmap(bufferlist &bl)
   latest_monmap.encode(bl, CEPH_FEATURES_ALL);
 }
 
-void Monitor::sync_reset()
+void Monitor::sync_reset_requester()
 {
+  dout(10) << __func__ << dendl;
+
   if (sync_timeout_event) {
     timer.cancel_event(sync_timeout_event);
     sync_timeout_event = NULL;
   }
 
-  // leader state
-  sync_providers.clear();
-
-  // requester state
   sync_provider = entity_inst_t();
   sync_cookie = 0;
   sync_full = false;
   sync_start_version = 0;
+}
+
+void Monitor::sync_reset_provider()
+{
+  dout(10) << __func__ << dendl;
+  sync_providers.clear();
 }
 
 void Monitor::sync_start(entity_inst_t &other, bool full)
@@ -832,7 +851,7 @@ void Monitor::sync_start(entity_inst_t &other, bool full)
   state = STATE_SYNCHRONIZING;
 
   // make sure are not a provider for anyone!
-  sync_reset();
+  sync_reset_provider();
 
   sync_full = full;
 
@@ -922,8 +941,6 @@ void Monitor::sync_finish(version_t last_committed)
   t.erase("mon_sync", "force_sync");
   t.erase("mon_sync", "last_committed_floor");
   store->apply_transaction(t);
-
-  sync_reset();
 
   assert(g_conf->mon_sync_requester_kill_at != 9);
 
@@ -1173,7 +1190,6 @@ void Monitor::handle_sync_chunk(MMonSync *m)
 void Monitor::handle_sync_no_cookie(MMonSync *m)
 {
   dout(10) << __func__ << dendl;
-  sync_reset();
   bootstrap();
 }
 
@@ -1534,11 +1550,23 @@ bool Monitor::_allowed_command(MonSession *s, map<string, cmd_vartype>& cmd)
   map<string,string> strmap;
   for (map<string, cmd_vartype>::const_iterator p = cmd.begin();
        p != cmd.end(); ++p) {
-    if (p->first != "prefix") {
-      strmap[p->first] = cmd_vartype_stringify(p->second);
+    if (p->first == "prefix")
+      continue;
+    if (p->first == "caps") {
+      vector<string> cv;
+      if (cmd_getval(g_ceph_context, cmd, "caps", cv) &&
+	  cv.size() % 2 == 0) {
+	for (unsigned i = 0; i < cv.size(); i += 2) {
+	  string k = string("caps_") + cv[i];
+	  strmap[k] = cv[i + 1];
+	}
+	continue;
+      }
     }
+    strmap[p->first] = cmd_vartype_stringify(p->second);
   }
 
+  dout(20) << __func__ << " strmap " << strmap << dendl;
   if (s->caps.is_capable(g_ceph_context, s->inst.name,
 			 "", prefix, strmap, false, false, true)) {
     retval = true; 
@@ -1588,6 +1616,14 @@ void Monitor::_quorum_status(Formatter *f, ostream& ss)
   for (set<int>::iterator p = quorum.begin(); p != quorum.end(); ++p)
     f->dump_int("mon", *p);
   f->close_section(); // quorum
+
+  set<string> quorum_names = get_quorum_names();
+  f->open_array_section("quorum_names");
+  for (set<string>::iterator p = quorum_names.begin(); p != quorum_names.end(); ++p)
+    f->dump_string("mon", *p);
+  f->close_section(); // quorum_names
+
+  f->dump_string("quorum_leader_name", quorum.empty() ? string() : monmap->get_name(*quorum.begin()));
 
   f->open_object_section("monmap");
   monmap->dump(f);
@@ -1743,7 +1779,7 @@ void Monitor::get_health(string& status, bufferlist *detailbl, Formatter *f)
       }
 
       if (f) {
-        f->open_object_section(name.c_str());
+        f->open_object_section("mon");
         f->dump_string("name", name.c_str());
         f->dump_float("skew", skew);
         f->dump_float("latency", latency);
@@ -1831,6 +1867,7 @@ void Monitor::get_status(stringstream &ss, Formatter *f)
     f->close_section();
     f->open_object_section("mdsmap");
     mdsmon()->mdsmap.print_summary(f, NULL);
+    f->close_section();
     f->close_section();
   } else {
     ss << "  cluster " << monmap->get_fsid() << "\n";

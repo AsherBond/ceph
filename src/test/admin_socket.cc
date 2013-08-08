@@ -64,16 +64,25 @@ TEST(AdminSocket, SendNoOp) {
   ASSERT_EQ(true, asoct.init(get_rand_socket_path()));
   AdminSocketClient client(get_rand_socket_path());
   string version;
-  ASSERT_EQ("", client.do_request("0", &version));
+  ASSERT_EQ("", client.do_request("{\"prefix\":\"0\"}", &version));
   ASSERT_EQ(CEPH_ADMIN_SOCK_VERSION, version);
   ASSERT_EQ(true, asoct.shutdown());
 }
 
 class MyTest : public AdminSocketHook {
-  bool call(std::string command, std::string args, bufferlist& result) {
+  bool call(std::string command, cmdmap_t& cmdmap, std::string format, bufferlist& result) {
+    std::vector<std::string> args;
+    cmd_getval(g_ceph_context, cmdmap, "args", args);
     result.append(command);
     result.append("|");
-    result.append(args);
+    string resultstr;
+    for (std::vector<std::string>::iterator it = args.begin();
+	 it != args.end(); ++it) {
+      if (it != args.begin())
+	resultstr += ' ';
+      resultstr += *it;
+    }
+    result.append(resultstr);
     return true;
   }
 };
@@ -87,16 +96,25 @@ TEST(AdminSocket, RegisterCommand) {
   AdminSocketClient client(get_rand_socket_path());
   ASSERT_EQ(0, asoct.m_asokc->register_command("test", "test", new MyTest(), ""));
   string result;
-  ASSERT_EQ("", client.do_request("test", &result));
+  ASSERT_EQ("", client.do_request("{\"prefix\":\"test\"}", &result));
   ASSERT_EQ("test|", result);
   ASSERT_EQ(true, asoct.shutdown());
 }
 
 class MyTest2 : public AdminSocketHook {
-  bool call(std::string command, std::string args, bufferlist& result) {
+  bool call(std::string command, cmdmap_t& cmdmap, std::string format, bufferlist& result) {
+    std::vector<std::string> args;
+    cmd_getval(g_ceph_context, cmdmap, "args", args);
     result.append(command);
     result.append("|");
-    result.append(args);
+    string resultstr;
+    for (std::vector<std::string>::iterator it = args.begin();
+	 it != args.end(); ++it) {
+      if (it != args.begin())
+	resultstr += ' ';
+      resultstr += *it;
+    }
+    result.append(resultstr);
     return true;
   }
 };
@@ -108,23 +126,23 @@ TEST(AdminSocket, RegisterCommandPrefixes) {
   ASSERT_EQ(true, asoct.shutdown());
   ASSERT_EQ(true, asoct.init(get_rand_socket_path()));
   AdminSocketClient client(get_rand_socket_path());
-  ASSERT_EQ(0, asoct.m_asokc->register_command("test", "test", new MyTest(), ""));
-  ASSERT_EQ(0, asoct.m_asokc->register_command("test command", "test command", new MyTest2(), ""));
+  ASSERT_EQ(0, asoct.m_asokc->register_command("test", "test name=args,type=CephString,n=N", new MyTest(), ""));
+  ASSERT_EQ(0, asoct.m_asokc->register_command("test command", "test command name=args,type=CephString,n=N", new MyTest2(), ""));
   string result;
-  ASSERT_EQ("", client.do_request("test", &result));
+  ASSERT_EQ("", client.do_request("{\"prefix\":\"test\"}", &result));
   ASSERT_EQ("test|", result);
-  ASSERT_EQ("", client.do_request("test command", &result));
+  ASSERT_EQ("", client.do_request("{\"prefix\":\"test command\"}", &result));
   ASSERT_EQ("test command|", result);
-  ASSERT_EQ("", client.do_request("test command post", &result));
+  ASSERT_EQ("", client.do_request("{\"prefix\":\"test command\",\"args\":[\"post\"]}", &result));
   ASSERT_EQ("test command|post", result);
-  ASSERT_EQ("", client.do_request("test command  post", &result));
+  ASSERT_EQ("", client.do_request("{\"prefix\":\"test command\",\"args\":[\" post\"]}", &result));
   ASSERT_EQ("test command| post", result);
-  ASSERT_EQ("", client.do_request("test this thing", &result));
+  ASSERT_EQ("", client.do_request("{\"prefix\":\"test\",\"args\":[\"this thing\"]}", &result));
   ASSERT_EQ("test|this thing", result);
 
-  ASSERT_EQ("", client.do_request("test  command post", &result));
+  ASSERT_EQ("", client.do_request("{\"prefix\":\"test\",\"args\":[\" command post\"]}", &result));
   ASSERT_EQ("test| command post", result);
-  ASSERT_EQ("", client.do_request("test  this thing", &result));
+  ASSERT_EQ("", client.do_request("{\"prefix\":\"test\",\"args\":[\" this thing\"]}", &result));
   ASSERT_EQ("test| this thing", result);
   ASSERT_EQ(true, asoct.shutdown());
 }

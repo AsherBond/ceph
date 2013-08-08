@@ -563,7 +563,9 @@ bool MDSMonitor::preprocess_command(MMonCommand *m)
 
   if (prefix == "mds stat") {
     if (f) {
+      f->open_object_section("mds_stat");
       dump_info(f.get());
+      f->close_section();
       f->flush(ds);
     } else {
       ds << mdsmap;
@@ -958,9 +960,9 @@ bool MDSMonitor::prepare_command(MMonCommand *m)
       wait_for_finished_proposal(new Monitor::C_Command(mon, m, 0, rs, get_last_committed()));
       return true;
     }
-  }    
-  if (r == -EINVAL) 
+  } else {
     ss << "unrecognized command";
+  }
  out:
   string rs;
   getline(ss, rs);

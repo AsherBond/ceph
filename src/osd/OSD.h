@@ -441,7 +441,12 @@ public:
   SimpleLRU<epoch_t, bufferlist> map_bl_cache;
   SimpleLRU<epoch_t, bufferlist> map_bl_inc_cache;
 
-  OSDMapRef get_map(epoch_t e);
+  OSDMapRef try_get_map(epoch_t e);
+  OSDMapRef get_map(epoch_t e) {
+    OSDMapRef ret(try_get_map(e));
+    assert(ret);
+    return ret;
+  }
   OSDMapRef add_map(OSDMap *o) {
     Mutex::Locker l(map_cache_lock);
     return _add_map(o);
@@ -617,7 +622,7 @@ protected:
   // asok
   friend class OSDSocketHook;
   class OSDSocketHook *asok_hook;
-  bool asok_command(string command, string args, ostream& ss);
+  bool asok_command(string command, cmdmap_t& cmdmap, string format, ostream& ss);
 
 public:
   ClassHandler  *class_handler;
@@ -906,7 +911,7 @@ private:
     bool _empty() {
       return pqueue.empty();
     }
-    void _process(PGRef pg);
+    void _process(PGRef pg, ThreadPool::TPHandle &handle);
   } op_wq;
 
   void enqueue_op(PG *pg, OpRequestRef op);

@@ -202,7 +202,11 @@ int rgw_bucket_set_attrs(RGWRados *store, rgw_bucket& bucket,
   string oid;
   store->get_bucket_meta_oid(bucket, oid);
   rgw_obj obj(store->zone.domain_root, oid);
-  return store->meta_mgr->set_attrs(bucket_meta_handler, oid,
+
+  string key;
+  store->get_bucket_instance_entry(bucket, key); /* we want the bucket instance name without
+						    the oid prefix cruft */
+  return store->meta_mgr->set_attrs(bucket_instance_meta_handler, key,
                                     obj, attrs, rmattrs, objv_tracker);
 }
 
@@ -1292,6 +1296,7 @@ RGWDataChangesLog::~RGWDataChangesLog() {
   down_flag.set(1);
   renew_thread->stop();
   renew_thread->join();
+  delete renew_thread;
   delete[] oids;
 }
 
@@ -1397,7 +1402,8 @@ public:
     return 0;
   }
 
-  int put(RGWRados *store, string& entry, RGWObjVersionTracker& objv_tracker, time_t mtime, JSONObj *obj) {
+  int put(RGWRados *store, string& entry, RGWObjVersionTracker& objv_tracker,
+          time_t mtime, JSONObj *obj, sync_type_t sync_type) {
     RGWBucketEntryPoint be, old_be;
     decode_json_obj(be, obj);
 
@@ -1409,6 +1415,13 @@ public:
     int ret = store->get_bucket_entrypoint_info(NULL, entry, old_be, &old_ot, &orig_mtime, &attrs);
     if (ret < 0 && ret != -ENOENT)
       return ret;
+
+    // are we actually going to perform this put, or is it too old?
+    if (ret != -ENOENT &&
+        !check_versions(old_ot.read_version, orig_mtime,
+			objv_tracker.write_version, mtime, sync_type)) {
+      return STATUS_NO_APPLY;
+    }
 
     objv_tracker.read_version = old_ot.read_version; /* maintain the obj version we just read */
 
@@ -1540,17 +1553,20 @@ public:
     return 0;
   }
 
-  int put(RGWRados *store, string& oid, RGWObjVersionTracker& objv_tracker, time_t mtime, JSONObj *obj) {
+  int put(RGWRados *store, string& oid, RGWObjVersionTracker& objv_tracker,
+          time_t mtime, JSONObj *obj, sync_type_t sync_type) {
     RGWBucketCompleteInfo bci, old_bci;
     decode_json_obj(bci, obj);
 
     time_t orig_mtime;
 
     int ret = store->get_bucket_instance_info(NULL, oid, old_bci.info, &orig_mtime, &old_bci.attrs);
-    if (ret < 0 && ret != -ENOENT)
+    bool exists = (ret != -ENOENT);
+    if (ret < 0 && exists)
       return ret;
 
-    if (ret == -ENOENT || old_bci.info.bucket.bucket_id != bci.info.bucket.bucket_id) {
+
+    if (!exists || old_bci.info.bucket.bucket_id != bci.info.bucket.bucket_id) {
       /* a new bucket, we need to select a new bucket placement for it */
       rgw_bucket bucket;
       ret = store->set_bucket_location_by_rule(bci.info.placement_rule, oid, bucket);
@@ -1564,6 +1580,14 @@ public:
       /* existing bucket, keep its placement pools */
       bci.info.bucket.data_pool = old_bci.info.bucket.data_pool;
       bci.info.bucket.index_pool = old_bci.info.bucket.index_pool;
+    }
+
+    // are we actually going to perform this put, or is it too old?
+    if (exists &&
+        !check_versions(old_bci.info.objv_tracker.read_version, orig_mtime,
+			objv_tracker.write_version, mtime, sync_type)) {
+      objv_tracker.read_version = old_bci.info.objv_tracker.read_version;
+      return STATUS_NO_APPLY;
     }
 
     /* record the read version (if any), store the new version */
@@ -1580,7 +1604,7 @@ public:
     if (ret < 0)
       return ret;
 
-    return 0;
+    return STATUS_APPLIED;
   }
 
   struct list_keys_info {

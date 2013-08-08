@@ -99,6 +99,8 @@ using ceph::crypto::MD5;
 #define STATUS_NO_CONTENT        1902
 #define STATUS_PARTIAL_CONTENT   1903
 #define STATUS_REDIRECT          1904
+#define STATUS_NO_APPLY          1905
+#define STATUS_APPLIED           1906
 
 #define ERR_INVALID_BUCKET_NAME  2000
 #define ERR_INVALID_OBJECT_NAME  2001
@@ -539,6 +541,10 @@ struct rgw_bucket {
   std::string index_pool;
   std::string marker;
   std::string bucket_id;
+
+  std::string oid; /*
+                    * runtime in-memory only info. If not empty, points to the bucket instance object
+                    */
 
   rgw_bucket() { }
   rgw_bucket(const char *n) : name(n) {

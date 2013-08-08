@@ -504,7 +504,7 @@ ceph_radosacl_SOURCES = radosacl.cc
 ceph_radosacl_LDADD = librados.la $(PTHREAD_LIBS) -lm $(CRYPTO_LIBS) $(EXTRALIBS)
 bin_DEBUGPROGRAMS += ceph_scratchtool ceph_scratchtoolpp ceph_radosacl
 
-rbd_SOURCES = rbd.cc common/fiemap.cc common/secret.c common/TextTable.cc common/util.cc
+rbd_SOURCES = rbd.cc common/secret.c common/TextTable.cc common/util.cc
 rbd_CXXFLAGS = ${AM_CXXFLAGS}
 rbd_LDADD = librbd.la librados.la $(LIBGLOBAL_LDA) -lkeyutils
 if LINUX
@@ -761,6 +761,11 @@ unittest_addrs_SOURCES = test/test_addrs.cc
 unittest_addrs_CXXFLAGS = ${AM_CXXFLAGS} ${UNITTEST_CXXFLAGS}
 unittest_addrs_LDADD = $(LIBGLOBAL_LDA) ${UNITTEST_LDADD}
 check_PROGRAMS += unittest_addrs
+
+unittest_sharedptr_registry_SOURCES = test/common/test_sharedptr_registry.cc
+unittest_sharedptr_registry_CXXFLAGS = ${AM_CXXFLAGS} ${UNITTEST_CXXFLAGS}
+unittest_sharedptr_registry_LDADD = libcommon.la ${LIBGLOBAL_LDA} ${UNITTEST_LDADD}
+check_PROGRAMS += unittest_sharedptr_registry
 
 unittest_util_SOURCES = test/common/test_util.cc common/util.cc
 unittest_util_CXXFLAGS = ${AM_CXXFLAGS} ${UNITTEST_CXXFLAGS}
@@ -1895,7 +1900,6 @@ noinst_HEADERS = \
         include/encoding.h\
         include/err.h\
         include/error.h\
-        include/fiemap.h\
         include/filepath.h\
         include/frag.h\
         include/hash.h\

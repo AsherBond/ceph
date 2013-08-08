@@ -168,6 +168,7 @@ public:
     case STATE_ELECTING: return "electing";
     case STATE_LEADER: return "leader";
     case STATE_PEON: return "peon";
+    case STATE_SHUTDOWN: return "shutdown";
     default: return "???";
     }
   }
@@ -301,10 +302,14 @@ private:
   set<string> get_sync_targets_names();
 
   /**
-   * Reset the monitor's sync-related data structures and state, both
-   * for the requester- and provider-side.
+   * Reset the monitor's sync-related data structures for syncing *from* a peer
    */
-  void sync_reset();
+  void sync_reset_requester();
+
+  /**
+   * Reset sync state related to allowing others to sync from us
+   */
+  void sync_reset_provider();
 
   /**
    * Caled when a sync attempt times out (requester-side)
@@ -581,7 +586,7 @@ public:
   bool _allowed_command(MonSession *s, map<std::string, cmd_vartype>& cmd);
   void _mon_status(Formatter *f, ostream& ss);
   void _quorum_status(Formatter *f, ostream& ss);
-  void _add_bootstrap_peer_hint(string cmd, string args, ostream& ss);
+  void _add_bootstrap_peer_hint(string cmd, cmdmap_t& cmdmap, ostream& ss);
   void handle_command(class MMonCommand *m);
   void handle_route(MRoute *m);
 
@@ -745,7 +750,8 @@ public:
   int write_fsid();
   int write_fsid(MonitorDBStore::Transaction &t);
 
-  void do_admin_command(std::string command, std::string args, ostream& ss);
+  void do_admin_command(std::string command, cmdmap_t& cmdmap,
+			std::string format, ostream& ss);
 
 private:
   // don't allow copying

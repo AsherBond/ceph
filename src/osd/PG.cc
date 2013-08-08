@@ -193,6 +193,13 @@ PG::~PG()
 #endif
 }
 
+void PG::lock_suspend_timeout(ThreadPool::TPHandle &handle)
+{
+  handle.suspend_tp_timeout();
+  lock();
+  handle.reset_tp_timeout();
+}
+
 void PG::lock(bool no_lockdep)
 {
   _lock.Lock(no_lockdep);
@@ -5032,7 +5039,6 @@ void PG::handle_advance_map(OSDMapRef osdmap, OSDMapRef lastmap,
 			    vector<int>& newup, vector<int>& newacting,
 			    RecoveryCtx *rctx)
 {
-  assert(osdmap->get_epoch() == (lastmap->get_epoch() + 1));
   assert(lastmap->get_epoch() == osdmap_ref->get_epoch());
   assert(lastmap == osdmap_ref);
   dout(10) << "handle_advance_map " << newup << "/" << newacting << dendl;

@@ -1323,9 +1323,7 @@ bool PGMonitor::preprocess_command(MMonCommand *m)
   cmd_getval(g_ceph_context, cmdmap, "prefix", prefix);
 
   MonSession *session = m->get_session();
-  if (!session ||
-      (!session->is_capable("pg", MON_CAP_R) &&
-       !mon->_allowed_command(session, cmdmap))) {
+  if (!session) {
     mon->reply_command(m, -EACCES, "access denied", rdata, get_last_committed());
     return true;
   }
@@ -1358,7 +1356,6 @@ bool PGMonitor::preprocess_command(MMonCommand *m)
     } else {
       ds << pg_map;
     }
-    rdata.append(ds);
     r = 0;
   } else if (prefix == "pg getmap") {
     pg_map.encode(rdata);
@@ -1404,7 +1401,10 @@ bool PGMonitor::preprocess_command(MMonCommand *m)
 	  pg_map.dump_osd_stats(f.get());
 	}
 	if (what.count("pgs")) {
-	  pg_map.dump_pg_stats(f.get());
+	  pg_map.dump_pg_stats(f.get(), false);
+	}
+	if (what.count("pgs_brief")) {
+	  pg_map.dump_pg_stats(f.get(), true);
 	}
       }
       f->flush(ds);
@@ -1571,9 +1571,7 @@ bool PGMonitor::prepare_command(MMonCommand *m)
   cmd_getval(g_ceph_context, cmdmap, "prefix", prefix);
 
   MonSession *session = m->get_session();
-  if (!session ||
-      (!session->is_capable("pg", MON_CAP_W) &&
-       !mon->_allowed_command(session, cmdmap))) {
+  if (!session) {
     mon->reply_command(m, -EACCES, "access denied", get_last_committed());
     return true;
   }

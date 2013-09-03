@@ -569,6 +569,34 @@ public:
 };
 WRITE_CLASS_ENCODER(pow2_hist_t)
 
+/**
+ * filestore_perf_stat_t
+ *
+ * current perf information about the osd
+ */
+struct filestore_perf_stat_t {
+  // cur_op_latency is in ms since double add/sub are not associative
+  uint32_t filestore_commit_latency;
+  uint32_t filestore_apply_latency;
+
+  filestore_perf_stat_t() :
+    filestore_commit_latency(0), filestore_apply_latency(0) {}
+
+  void add(const filestore_perf_stat_t &o) {
+    filestore_commit_latency += o.filestore_commit_latency;
+    filestore_apply_latency += o.filestore_apply_latency;
+  }
+  void sub(const filestore_perf_stat_t &o) {
+    filestore_commit_latency -= o.filestore_commit_latency;
+    filestore_apply_latency -= o.filestore_apply_latency;
+  }
+  void dump(Formatter *f) const;
+  void encode(bufferlist &bl) const;
+  void decode(bufferlist::iterator &bl);
+  static void generate_test_instances(std::list<filestore_perf_stat_t*>& o);
+};
+WRITE_CLASS_ENCODER(filestore_perf_stat_t)
+
 /** osd_stat
  * aggregate stats for an osd
  */
@@ -578,6 +606,8 @@ struct osd_stat_t {
   int32_t snap_trim_queue_len, num_snap_trimming;
 
   pow2_hist_t op_queue_age_hist;
+
+  filestore_perf_stat_t fs_perf_stat;
 
   osd_stat_t() : kb(0), kb_used(0), kb_avail(0),
 		 snap_trim_queue_len(0), num_snap_trimming(0) {}
@@ -589,6 +619,7 @@ struct osd_stat_t {
     snap_trim_queue_len += o.snap_trim_queue_len;
     num_snap_trimming += o.num_snap_trimming;
     op_queue_age_hist.add(o.op_queue_age_hist);
+    fs_perf_stat.add(o.fs_perf_stat);
   }
   void sub(const osd_stat_t& o) {
     kb -= o.kb;
@@ -597,6 +628,7 @@ struct osd_stat_t {
     snap_trim_queue_len -= o.snap_trim_queue_len;
     num_snap_trimming -= o.num_snap_trimming;
     op_queue_age_hist.sub(o.op_queue_age_hist);
+    fs_perf_stat.sub(o.fs_perf_stat);
   }
 
   void dump(Formatter *f) const;
@@ -690,11 +722,6 @@ struct pg_pool_t {
     TYPE_REP = 1,     // replication
     TYPE_RAID4 = 2,   // raid4 (never implemented)
   };
-  enum {
-    FLAG_HASHPSPOOL = 1, // hash pg seed and pool together (instead of adding)
-    FLAG_FULL       = 2, // pool is full
-  };
-
   static const char *get_type_name(int t) {
     switch (t) {
     case TYPE_REP: return "rep";
@@ -706,6 +733,41 @@ struct pg_pool_t {
     return get_type_name(type);
   }
 
+  enum {
+    FLAG_HASHPSPOOL = 1, // hash pg seed and pool together (instead of adding)
+    FLAG_FULL       = 2, // pool is full
+  };
+
+  typedef enum {
+    CACHEMODE_NONE = 0,                  ///< no caching
+    CACHEMODE_WRITEBACK = 1,             ///< write to cache, flush later
+    CACHEMODE_INVALIDATE_FORWARD = 2,    ///< delete from cache, forward write
+    CACHEMODE_READONLY = 3,              ///< handle reads, forward writes [not strongly consistent]
+  } cache_mode_t;
+  static const char *get_cache_mode_name(cache_mode_t m) {
+    switch (m) {
+    case CACHEMODE_NONE: return "none";
+    case CACHEMODE_WRITEBACK: return "writeback";
+    case CACHEMODE_INVALIDATE_FORWARD: return "invalidate+forward";
+    case CACHEMODE_READONLY: return "readonly";
+    default: return "unknown";
+    }
+  }
+  static cache_mode_t get_cache_mode_from_str(const string& s) {
+    if (s == "none")
+      return CACHEMODE_NONE;
+    if (s == "writeback")
+      return CACHEMODE_WRITEBACK;
+    if (s == "invalidate+forward")
+      return CACHEMODE_INVALIDATE_FORWARD;
+    if (s == "readonly")
+      return CACHEMODE_READONLY;
+    return (cache_mode_t)-1;
+  }
+  const char *get_cache_mode_name() const {
+    return get_cache_mode_name(cache_mode);
+  }
+
   uint64_t flags;           /// FLAG_* 
   __u8 type;                /// TYPE_*
   __u8 size, min_size;      /// number of osds in each pg
@@ -713,6 +775,8 @@ struct pg_pool_t {
   __u8 object_hash;         /// hash mapping object name to ps
 private:
   __u32 pg_num, pgp_num;    /// number of pgs
+
+
 public:
   epoch_t last_change;      /// most recent epoch changed, exclusing snapshot changes
   snapid_t snap_seq;        /// seq for per-pool snapshot
@@ -739,6 +803,21 @@ public:
 
   int pg_num_mask, pgp_num_mask;
 
+  set<uint64_t> tiers;      ///< pools that are tiers of us
+  int64_t tier_of;         ///< pool for which we are a tier
+  // Note that write wins for read+write ops
+  int64_t read_tier;       ///< pool/tier for objecter to direct reads to
+  int64_t write_tier;      ///< pool/tier for objecter to direct writes to
+  cache_mode_t cache_mode;  ///< cache pool mode
+
+
+  bool is_tier() const { return tier_of >= 0; }
+  void clear_tier() { tier_of = -1; }
+  bool has_read_tier() const { return read_tier >= 0; }
+  void clear_read_tier() { read_tier = -1; }
+  bool has_write_tier() const { return write_tier >= 0; }
+  void clear_write_tier() { write_tier = -1; }
+
   pg_pool_t()
     : flags(0), type(0), size(0), min_size(0),
       crush_ruleset(0), object_hash(0),
@@ -748,7 +827,10 @@ public:
       auid(0),
       crash_replay_interval(0),
       quota_max_bytes(0), quota_max_objects(0),
-      pg_num_mask(0), pgp_num_mask(0) { }
+      pg_num_mask(0), pgp_num_mask(0),
+      tier_of(-1), read_tier(-1), write_tier(-1),
+      cache_mode(CACHEMODE_NONE)
+  { }
 
   void dump(Formatter *f) const;
 
@@ -1235,6 +1317,8 @@ struct pg_info_t {
   eversion_t last_complete;  // last version pg was complete through.
   epoch_t last_epoch_started;// last epoch at which this pg started on this osd
   
+  version_t last_user_version; // last user object version applied to store
+
   eversion_t log_tail;     // oldest log entry.
 
   hobject_t last_backfill;   // objects >= this and < last_complete may be missing
@@ -1246,11 +1330,13 @@ struct pg_info_t {
   pg_history_t history;
 
   pg_info_t()
-    : last_epoch_started(0), last_backfill(hobject_t::get_max())
+    : last_epoch_started(0), last_user_version(0),
+      last_backfill(hobject_t::get_max())
   { }
   pg_info_t(pg_t p)
     : pgid(p),
-      last_epoch_started(0), last_backfill(hobject_t::get_max())
+      last_epoch_started(0), last_user_version(0),
+      last_backfill(hobject_t::get_max())
   { }
   
   bool is_empty() const { return last_update.version == 0; }
@@ -1449,6 +1535,7 @@ struct pg_log_entry_t {
   __s32      op;
   hobject_t  soid;
   eversion_t version, prior_version, reverting_to;
+  version_t user_version; // the user version for this entry
   osd_reqid_t reqid;  // caller+tid to uniquely identify request
   utime_t     mtime;  // this is the _user_ mtime, mind you
   bufferlist snaps;   // only for clone entries
@@ -1458,12 +1545,14 @@ struct pg_log_entry_t {
   uint64_t offset;   // [soft state] my offset on disk
       
   pg_log_entry_t()
-    : op(0), invalid_hash(false), invalid_pool(false), offset(0) {}
+    : op(0), user_version(0),
+      invalid_hash(false), invalid_pool(false), offset(0) {}
   pg_log_entry_t(int _op, const hobject_t& _soid, 
 		 const eversion_t& v, const eversion_t& pv,
+		 version_t uv,
 		 const osd_reqid_t& rid, const utime_t& mt)
     : op(_op), soid(_soid), version(v),
-      prior_version(pv),
+      prior_version(pv), user_version(uv),
       reqid(rid), mtime(mt), invalid_hash(false), invalid_pool(false),
       offset(0) {}
       
@@ -1727,6 +1816,37 @@ struct pg_ls_response_t {
 
 WRITE_CLASS_ENCODER(pg_ls_response_t)
 
+/**
+ * object_copy_cursor_t
+ */
+struct object_copy_cursor_t {
+  bool attr_complete;
+  uint64_t data_offset;
+  bool data_complete;
+  string omap_offset;
+  bool omap_complete;
+
+  object_copy_cursor_t()
+    : attr_complete(false),
+      data_offset(0),
+      data_complete(false),
+      omap_complete(false)
+  {}
+
+  bool is_initial() const {
+    return !attr_complete && data_offset == 0 && omap_offset.empty();
+  }
+  bool is_complete() const {
+    return attr_complete && data_complete && omap_complete;
+  }
+
+  static void generate_test_instances(list<object_copy_cursor_t*>& o);
+  void encode(bufferlist& bl) const;
+  void decode(bufferlist::iterator &bl);
+  void dump(Formatter *f) const;
+};
+WRITE_CLASS_ENCODER(object_copy_cursor_t)
+
 
 /**
  * pg creation info
@@ -1920,7 +2040,7 @@ struct object_info_t {
   string category;
 
   eversion_t version, prior_version;
-  eversion_t user_version;
+  version_t user_version;
   osd_reqid_t last_reqid;
 
   uint64_t size;
@@ -1951,12 +2071,12 @@ struct object_info_t {
   static void generate_test_instances(list<object_info_t*>& o);
 
   explicit object_info_t()
-    : size(0), lost(false),
+    : user_version(0), size(0), lost(false),
       truncate_seq(0), truncate_size(0), uses_tmap(false)
   {}
 
   object_info_t(const hobject_t& s)
-    : soid(s), size(0),
+    : soid(s), user_version(0), size(0),
       lost(false), truncate_seq(0), truncate_size(0), uses_tmap(false) {}
 
   object_info_t(bufferlist& bl) {
@@ -1968,6 +2088,8 @@ WRITE_CLASS_ENCODER(object_info_t)
 struct ObjectState {
   object_info_t oi;
   bool exists;
+
+  ObjectState() : exists(false) {}
 
   ObjectState(const object_info_t &oi_, bool exists_)
     : oi(oi_), exists(exists_) {}
@@ -1990,12 +2112,17 @@ struct SnapSetContext {
   * etc., because we don't send writes down to disk until after
   * replicas ack.
   */
+
+struct ObjectContext;
+
+typedef std::tr1::shared_ptr<ObjectContext> ObjectContextRef;
+
 struct ObjectContext {
-  int ref;
-  bool registered;
   ObjectState obs;
 
   SnapSetContext *ssc;  // may be null
+
+  Context *destructor_callback;
 
 private:
   Mutex lock;
@@ -2004,20 +2131,22 @@ public:
   int unstable_writes, readers, writers_waiting, readers_waiting;
 
   // set if writes for this object are blocked on another objects recovery
-  ObjectContext *blocked_by;      // object blocking our writes
-  set<ObjectContext*> blocking;   // objects whose writes we block
+  ObjectContextRef blocked_by;      // object blocking our writes
+  set<ObjectContextRef> blocking;   // objects whose writes we block
 
   // any entity in obs.oi.watchers MUST be in either watchers or unconnected_watchers.
   map<pair<uint64_t, entity_name_t>, WatchRef> watchers;
 
-  ObjectContext(const object_info_t &oi_, bool exists_, SnapSetContext *ssc_)
-    : ref(0), registered(false), obs(oi_, exists_), ssc(ssc_),
+  ObjectContext()
+    : ssc(NULL),
+      destructor_callback(0),
       lock("ReplicatedPG::ObjectContext::lock"),
-      unstable_writes(0), readers(0), writers_waiting(0), readers_waiting(0),
-      blocked_by(0) {}
+      unstable_writes(0), readers(0), writers_waiting(0), readers_waiting(0) {}
 
-  void get() { ++ref; }
-
+  ~ObjectContext() {
+    if (destructor_callback)
+      destructor_callback->complete(0);
+  }
   // do simple synchronous mutual exclusion, for now.  now waitqueues or anything fancy.
   void ondisk_write_lock() {
     lock.Lock();

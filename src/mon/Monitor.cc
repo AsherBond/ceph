@@ -1292,7 +1292,8 @@ void Monitor::handle_probe_reply(MMonProbe *m)
   dout(10) << "handle_probe_reply " << m->get_source_inst() << *m << dendl;
   dout(10) << " monmap is " << *monmap << dendl;
 
-  if (!is_probing()) {
+  // discover name and addrs during probing or electing states.
+  if (!is_probing() && !is_electing()) {
     m->put();
     return;
   }
@@ -1326,6 +1327,12 @@ void Monitor::handle_probe_reply(MMonProbe *m)
 	     << peer_name << " -> " << m->name << " in my monmap"
 	     << dendl;
     monmap->rename(peer_name, m->name);
+
+    if (is_electing()) {
+      m->put();
+      bootstrap();
+      return;
+    }
   } else {
     dout(10) << " peer name is " << peer_name << dendl;
   }
@@ -1340,6 +1347,12 @@ void Monitor::handle_probe_reply(MMonProbe *m)
       bootstrap();
       return;
     }
+  }
+
+  // end discover phase
+  if (!is_probing()) {
+    m->put();
+    return;
   }
 
   assert(paxos != NULL);
@@ -1829,13 +1842,14 @@ void Monitor::get_status(stringstream &ss, Formatter *f)
     f->close_section();
     f->close_section();
   } else {
-    ss << "  cluster " << monmap->get_fsid() << "\n";
-    ss << "   health " << health << "\n";
-    ss << "   monmap " << *monmap << ", election epoch " << get_epoch()
+    ss << "    cluster " << monmap->get_fsid() << "\n";
+    ss << "     health " << health << "\n";
+    ss << "     monmap " << *monmap << ", election epoch " << get_epoch()
       << ", quorum " << get_quorum() << " " << get_quorum_names() << "\n";
-    ss << "   osdmap " << osdmon()->osdmap << "\n";
-    ss << "    pgmap " << pgmon()->pg_map << "\n";
-    ss << "   mdsmap " << mdsmon()->mdsmap << "\n";
+    if (mdsmon()->mdsmap.get_epoch() > 1)
+      ss << "     mdsmap " << mdsmon()->mdsmap << "\n";
+    osdmon()->osdmap.print_summary(NULL, ss);
+    pgmon()->pg_map.print_summary(NULL, &ss);
   }
 }
 
@@ -1877,7 +1891,6 @@ bool Monitor::_allowed_command(MonSession *s, string &module, string &prefix,
   MonCommand *this_cmd = NULL;
   for (MonCommand *cp = mon_commands;
        cp < &mon_commands[ARRAY_SIZE(mon_commands)]; cp++) {
-    dout(0) << __func__ << " CAPSBAR >> matching against " << cp->cmdstring << dendl;
     if (cp->cmdstring.find(prefix) != string::npos) {
       this_cmd = cp;
       break;
@@ -2054,11 +2067,8 @@ void Monitor::handle_command(MMonCommand *m)
     cmd_getval(g_ceph_context, cmdmap, "injected_args", injected_args);
     if (!injected_args.empty()) {
       dout(0) << "parsing injected options '" << injected_args << "'" << dendl;
-      ostringstream argss;
-      std::copy(injected_args.begin(), injected_args.end(),
-		ostream_iterator<string>(argss, " "));
       ostringstream oss;
-      r = g_conf->injectargs(argss.str().c_str(), &oss);
+      r = g_conf->injectargs(str_join(injected_args, " "), &oss);
       ss << "injectargs:"  << oss.str();
       rs = ss.str();
       goto out;
@@ -2130,10 +2140,7 @@ void Monitor::handle_command(MMonCommand *m)
 
     vector<string> tagsvec;
     cmd_getval(g_ceph_context, cmdmap, "tags", tagsvec);
-    stringstream tags;
-    std::copy(tagsvec.begin(), tagsvec.end(),
-	      ostream_iterator<string>(tags, " "));
-    string tagstr = tags.str();
+    string tagstr = str_join(tagsvec, " ");
     if (!tagstr.empty())
       tagstr = tagstr.substr(0, tagstr.find_last_of(' '));
     f->dump_string("tag", tagstr);

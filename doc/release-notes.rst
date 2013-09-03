@@ -2,6 +2,49 @@
  Release Notes
 ===============
 
+v0.67.2 "Dumpling"
+------------------
+
+This is an imporant point release for Dumpling.  Most notably, it
+fixes a problem when upgrading directly from v0.56.x Bobtail to
+v0.67.x Dumpling (without stopping at v0.61.x Cuttlefish along the
+way).  It also fixes a problem with the CLI parsing of the CEPH_ARGS
+environment variable, high CPU utilization by the ceph-osd daemons,
+and cleans up the radosgw shutdown sequence.
+
+Notable Changes
+~~~~~~~~~~~~~~~
+
+* objecter: resend linger requests when cluster goes from full to non-full
+* ceph: parse CEPH_ARGS environment variable
+* librados: fix small memory leak
+* osd: remove old log objects on upgrade (fixes bobtail -> dumpling jump)
+* osd: disable PGLog::check() via config option (fixes CPU burn)
+* rgw: drain requests on shutdown
+* rgw: misc memory leaks on shutdown
+
+For more detailed information, see :download:`the complete changelog <changelog/v0.67.2.txt>`.
+
+
+v0.67.1 "Dumpling"
+------------------
+
+This is a minor point release for Dumpling that fixes problems with
+OpenStack and librbd hangs when caching is disabled.
+
+Notable changes
+~~~~~~~~~~~~~~~
+
+* librados, librbd: fix constructor for python bindings with certain
+  usages (in particular, that used by OpenStack)
+* librados, librbd: fix aio_flush wakeup when cache is disabled
+* librados: fix locking for aio completion refcounting
+* fixes 'ceph --admin-daemon ...' command error code on error
+* fixes 'ceph daemon ... config set ...' command for boolean config
+  options.
+
+For more detailed information, see :download:`the complete changelog <changelog/v0.67.1.txt>`.
+
 v0.67 "Dumpling"
 ----------------
 
@@ -21,6 +64,23 @@ headline features for this release include:
   ceph-rest-api.8 for more.
 
 * Object namespaces in librados.
+
+Upgrade Sequencing
+~~~~~~~~~~~~~~~~~~
+
+It is possible to do a rolling upgrade from Cuttlefish to Dumpling.
+
+#. Upgrade ceph-common on all nodes that will use the command line
+   'ceph' utility.
+#. Upgrade all monitors (upgrade ceph package, restart ceph-mon
+   daemons).  This can happen one daemon or host at a time.  Note that
+   because cuttlefish and dumpling monitors can't talk to each other,
+   all monitors should be upgraded in relatively short succession to
+   minimize the risk that an a untimely failure will reduce
+   availability.
+#. Upgrade all osds (upgrade ceph package, restart ceph-osd daemons).
+   This can happen one daemon or host at a time.
+#. Upgrade radosgw (upgrade radosgw package, restart radosgw daemons).
 
 
 Upgrading from v0.66
@@ -86,6 +146,56 @@ Upgrading from v0.66
   the sysvinit script will set it to 32k by default (still
   overrideable via max_open_files).  If this field has been customized
   in ceph.conf it should likely be adjusted upwards.
+
+Upgrading from v0.61 "Cuttlefish"
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In addition to the above notes about upgrading from v0.66:
+
+* There has been a huge revamp of the 'ceph' command-line interface
+  implementation.  The ``ceph-common`` client library needs to be
+  upgrade before ``ceph-mon`` is restarted in order to avoid problems
+  using the CLI (the old ``ceph`` client utility cannot talk to the
+  new ``ceph-mon``).
+
+* The CLI is now very careful about sending the 'status' one-liner
+  output to stderr and command output to stdout.  Scripts relying on
+  output should take care.
+
+* The 'ceph osd tell ...' and 'ceph mon tell ...' commands are no
+  longer supported.  Any callers should use::
+
+    ceph tell osd.<id or *> ...
+    ceph tell mon.<id or name or *> ...
+
+  The 'ceph mds tell ...' command is still there, but will soon also
+  transition to 'ceph tell mds.<id or name or *> ...'
+
+* The 'ceph osd crush add ...' command used to take one of two forms::
+
+    ceph osd crush add 123 osd.123 <weight> <location ...>
+    ceph osd crush add osd.123 <weight> <location ...>
+
+  This is because the id and crush name are redundant.  Now only the
+  simple form is supported, where the osd name/id can either be a bare
+  id (integer) or name (osd.<id>)::
+
+    ceph osd crush add osd.123 <weight> <location ...>
+    ceph osd crush add 123 <weight> <location ...>
+
+* There is now a maximum RADOS object size, configurable via 'osd max
+  object size', defaulting to 100 GB.  Note that this has no effect on
+  RBD, CephFS, or radosgw, which all stripe over objects. If you are
+  using librados and storing objects larger than that, you will need
+  to adjust 'osd max object size', and should consider using smaller
+  objects instead.
+
+* The 'osd min down {reporters|reports}' config options have been
+  renamed to 'mon osd min down {reporters|reports}', and the
+  documentation has been updated to reflect that these options apply
+  to the monitors (who process failure reports) and not OSDs.  If you
+  have adjusted these settings, please update your ``ceph.conf''
+  accordingly.
 
 
 Notable changes since v0.66
@@ -426,6 +536,38 @@ Notable Changes
 * radosgw-admin: create keys for new users by default
 * librados python binding cleanups
 * misc code cleanups
+
+
+
+v0.61.8 "Cuttlefish"
+--------------------
+
+This release includes a number of important issues, including rare
+race conditions in the OSD, a few monitor bugs, and fixes for RBD
+flush behavior.  We recommend that production users upgrade at their
+convenience.
+
+Notable Changes
+~~~~~~~~~~~~~~~
+
+* librados: fix async aio completion wakeup
+* librados: fix aio completion locking
+* librados: fix rare deadlock during shutdown
+* osd: fix race when queueing recovery operations
+* osd: fix possible race during recovery
+* osd: optionally preload rados classes on startup (disabled by default)
+* osd: fix journal replay corner condition
+* osd: limit size of peering work queue batch (to speed up peering)
+* mon: fix paxos recovery corner case
+* mon: fix rare hang when monmap updates during an election
+* mon: make 'osd pool mksnap ...' avoid exposing uncommitted state
+* mon: make 'osd pool rmsnap ...' not racy, avoid exposing uncommitted state
+* mon: fix bug during mon cluster expansion
+* rgw: fix crash during multi delete operation
+* msgr: fix race conditions during osd network reinitialization
+* ceph-disk: apply mount options when remounting
+
+For more detailed information, see :download:`the complete changelog <changelog/v0.61.8.txt>`.
 
 
 v0.61.7 "Cuttlefish"
@@ -1075,6 +1217,53 @@ Notable Changes
 * mds: misc bug fixes with readdir
 * libcephfs: many fixes, cleanups with the Java bindings
 * auth: ability to require new cephx signatures on messages (still off by default)
+
+
+
+v0.56.7 "bobtail"
+-----------------
+
+This bobtail update fixes a range of radosgw bugs (including an easily
+triggered crash from multi-delete), a possible data corruption issue
+with power failure on XFS, and several OSD problems, including a
+memory "leak" that will affect aged clusters.
+
+Notable changes
+~~~~~~~~~~~~~~~
+
+* ceph-fuse: create finisher flags after fork()
+* debian: fix prerm/postinst hooks; do not restart daemons on upgrade
+* librados: fix async aio completion wakeup (manifests as rbd hang)
+* librados: fix hang when osd becomes full and then not full
+* librados: fix locking for aio completion refcounting
+* librbd python bindings: fix stripe_unit, stripe_count
+* librbd: make image creation default configurable
+* mon: fix validation of mds ids in mon commands
+* osd: avoid excessive disk updates during peering
+* osd: avoid excessive memory usage on scrub
+* osd: avoid heartbeat failure/suicide when scrubbing
+* osd: misc minor bug fixes
+* osd: use fdatasync instead of sync_file_range (may avoid xfs power-loss corruption)
+* rgw: escape prefix correctly when listing objects
+* rgw: fix copy attrs
+* rgw: fix crash on multi delete
+* rgw: fix locking/crash when using ops log socket
+* rgw: fix usage logging
+* rgw: handle deep uri resources
+
+For more detailed information, see :download:`the complete changelog <changelog/v0.56.7.txt>`.
+
+
+v0.56.6 "bobtail"
+-----------------
+
+Notable changes
+~~~~~~~~~~~~~~~
+
+* rgw: fix garbage collection
+* rpm: fix package dependencies
+
+For more detailed information, see :download:`the complete changelog <changelog/v0.56.6.txt>`.
 
 
 v0.56.5 "bobtail"

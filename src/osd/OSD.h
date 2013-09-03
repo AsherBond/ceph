@@ -113,8 +113,43 @@ enum {
   l_osd_mape_dup,
 
   l_osd_waiting_for_map,
-  l_osd_peering_latency,
+
   l_osd_last,
+};
+
+// RecoveryState perf counters
+enum {
+  rs_first = 20000,
+  rs_initial_latency,
+  rs_started_latency,
+  rs_reset_latency,
+  rs_start_latency,
+  rs_primary_latency,
+  rs_peering_latency,
+  rs_backfilling_latency,
+  rs_waitremotebackfillreserved_latency,
+  rs_waitlocalbackfillreserved_latency,
+  rs_notbackfilling_latency,
+  rs_repnotrecovering_latency,
+  rs_repwaitrecoveryreserved_latency,
+  rs_repwaitbackfillreserved_latency,
+  rs_RepRecovering_latency,
+  rs_activating_latency,
+  rs_waitlocalrecoveryreserved_latency,
+  rs_waitremoterecoveryreserved_latency,
+  rs_recovering_latency,
+  rs_recovered_latency,
+  rs_clean_latency,
+  rs_active_latency,
+  rs_replicaactive_latency,
+  rs_stray_latency,
+  rs_getinfo_latency,
+  rs_getlog_latency,
+  rs_waitactingchange_latency,
+  rs_incomplete_latency,
+  rs_getmissing_latency,
+  rs_waitupthru_latency,
+  rs_last,
 };
 
 class Messenger;
@@ -126,6 +161,7 @@ class OSDMap;
 class MLog;
 class MClass;
 class MOSDPGMissing;
+class Objecter;
 
 class Watch;
 class Notification;
@@ -258,6 +294,7 @@ private:
   Messenger *&client_messenger;
 public:
   PerfCounters *&logger;
+  PerfCounters *&recoverystate_perf;
   MonClient   *&monc;
   ThreadPool::WorkQueueVal<pair<PGRef, OpRequestRef>, PGRef> &op_wq;
   ThreadPool::BatchWorkQueue<PG> &peering_wq;
@@ -378,8 +415,28 @@ public:
   void dec_scrubs_active();
 
   void reply_op_error(OpRequestRef op, int err);
-  void reply_op_error(OpRequestRef op, int err, eversion_t v);
+  void reply_op_error(OpRequestRef op, int err, eversion_t v, version_t uv);
   void handle_misdirected_op(PG *pg, OpRequestRef op);
+
+  // -- Objecter, for teiring reads/writes from/to other OSDs --
+  Mutex objecter_lock;
+  SafeTimer objecter_timer;
+  OSDMap objecter_osdmap;
+  Objecter *objecter;
+  Finisher objecter_finisher;
+  struct ObjecterDispatcher : public Dispatcher {
+    OSDService *osd;
+    bool ms_dispatch(Message *m);
+    bool ms_handle_reset(Connection *con);
+    void ms_handle_remote_reset(Connection *con) {}
+    void ms_handle_connect(Connection *con);
+    bool ms_get_authorizer(int dest_type,
+			   AuthAuthorizer **authorizer,
+			   bool force_new);
+    ObjecterDispatcher(OSDService *o) : Dispatcher(g_ceph_context), osd(o) {}
+  } objecter_dispatcher;
+  friend class ObjecterDispatcher;
+
 
   // -- Watch --
   Mutex watch_lock;
@@ -572,6 +629,7 @@ public:
 #endif
 
   OSDService(OSD *osd);
+  ~OSDService();
 };
 class OSD : public Dispatcher,
 	    public md_config_obs_t {
@@ -591,8 +649,10 @@ protected:
 
   Messenger   *cluster_messenger;
   Messenger   *client_messenger;
+  Messenger   *objecter_messenger;
   MonClient   *monc;
   PerfCounters      *logger;
+  PerfCounters      *recoverystate_perf;
   ObjectStore *store;
 
   LogClient clog;
@@ -613,6 +673,7 @@ protected:
   int dispatch_running;
 
   void create_logger();
+  void create_recoverystate_perf();
   void tick();
   void _dispatch(Message *m);
   void dispatch_op(OpRequestRef op);
@@ -794,7 +855,8 @@ public:
   bool heartbeat_dispatch(Message *m);
 
   struct HeartbeatDispatcher : public Dispatcher {
-  private:
+    OSD *osd;
+    HeartbeatDispatcher(OSD *o) : Dispatcher(g_ceph_context), osd(o) {}
     bool ms_dispatch(Message *m) {
       return osd->heartbeat_dispatch(m);
     };
@@ -808,14 +870,7 @@ public:
       isvalid = true;
       return true;
     }
-  public:
-    OSD *osd;
-    HeartbeatDispatcher(OSD *o) 
-      : Dispatcher(g_ceph_context), osd(o)
-    {
-    }
   } heartbeat_dispatcher;
-
 
 private:
   // -- stats --
@@ -851,7 +906,7 @@ private:
   void test_ops(std::string command, std::string args, ostream& ss);
   friend class TestOpsSocketHook;
   TestOpsSocketHook *test_ops_hook;
-  friend class C_CompleteSplits;
+  friend struct C_CompleteSplits;
 
   // -- op queue --
 
@@ -1176,7 +1231,7 @@ protected:
   void start_waiting_for_healthy();
   bool _is_healthy();
   
-  friend class C_OSD_GetVersion;
+  friend struct C_OSD_GetVersion;
 
   // -- alive --
   epoch_t up_thru_wanted;
@@ -1638,8 +1693,13 @@ protected:
  public:
   /* internal and external can point to the same messenger, they will still
    * be cleaned up properly*/
-  OSD(int id, Messenger *internal, Messenger *external,
-      Messenger *hb_client, Messenger *hb_front_server, Messenger *hb_back_server,
+  OSD(int id,
+      Messenger *internal,
+      Messenger *external,
+      Messenger *hb_client,
+      Messenger *hb_front_server,
+      Messenger *hb_back_server,
+      Messenger *osdc_messenger,
       MonClient *mc, const std::string &dev, const std::string &jdev);
   ~OSD();
 
@@ -1681,6 +1741,7 @@ public:
   // startup/shutdown
   int pre_init();
   int init();
+  void final_init();
 
   void suicide(int exitcode);
   int shutdown();
@@ -1688,7 +1749,7 @@ public:
   void handle_signal(int signum);
 
   void handle_rep_scrub(MOSDRepScrub *m);
-  void handle_scrub(class MOSDScrub *m);
+  void handle_scrub(struct MOSDScrub *m);
   void handle_osd_ping(class MOSDPing *m);
   void handle_op(OpRequestRef op);
 

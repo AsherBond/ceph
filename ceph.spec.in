@@ -42,6 +42,7 @@ BuildRequires:  libcurl-devel
 BuildRequires:  libxml2-devel
 BuildRequires:  libuuid-devel
 BuildRequires:  leveldb-devel > 1.2
+BuildRequires:  yasm
 %if 0%{?rhel_version} || 0%{?centos_version} || 0%{?fedora}
 BuildRequires:  snappy-devel
 %endif
@@ -125,7 +126,6 @@ Requires:	apache2-mod_fcgid
 %else
 BuildRequires:	expat-devel
 BuildRequires:	fcgi-devel
-Requires:	mod_fcgid
 %endif
 %description radosgw
 radosgw is an S3 HTTP REST gateway for the RADOS object store. It is
@@ -249,7 +249,7 @@ BuildRequires:  junit
 %description -n cephfs-java
 This package contains the Java libraries for the Ceph File System.
 
-%if (0%{?centos} || 0%{?opensuse} || 0%{?suse_version})
+%if 0%{?opensuse} || 0%{?suse_version}
 %debug_package
 %endif
 
@@ -384,6 +384,9 @@ fi
 %dir %{_docdir}/ceph
 %{_docdir}/ceph/sample.ceph.conf
 %{_docdir}/ceph/sample.fetch_config
+%{_datadir}/ceph/known_hosts_drop.ceph.com
+%{_datadir}/ceph/id_dsa_drop.ceph.com
+%{_datadir}/ceph/id_dsa_drop.ceph.com.pub
 %{_bindir}/ceph
 %{_bindir}/cephfs
 %{_bindir}/ceph-conf
@@ -394,6 +397,7 @@ fi
 %{_bindir}/osdmaptool
 %{_bindir}/ceph-authtool
 %{_bindir}/ceph-syn
+%{_bindir}/ceph-post-file
 %{_bindir}/ceph-run
 %{_bindir}/ceph-mon
 %{_bindir}/ceph-mds
@@ -445,6 +449,7 @@ fi
 %{_mandir}/man8/mkcephfs.8*
 %{_mandir}/man8/ceph-run.8*
 %{_mandir}/man8/ceph-syn.8*
+%{_mandir}/man8/ceph-post-file.8*
 %{_mandir}/man8/ceph-dencoder.8*
 %{_mandir}/man8/ceph-rest-api.8*
 %{_mandir}/man8/crushtool.8*
@@ -614,6 +619,7 @@ fi
 %{_bindir}/ceph_filestore_dump
 %{_bindir}/ceph_streamtest
 %{_bindir}/ceph_test_cfuse_cache_invalidate
+%{_bindir}/ceph_test_cls_hello
 %{_bindir}/ceph_test_cls_lock
 %{_bindir}/ceph_test_cls_log
 %{_bindir}/ceph_test_cls_rbd

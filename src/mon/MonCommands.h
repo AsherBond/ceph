@@ -111,7 +111,7 @@ COMMAND("pg getmap", "get binary pg map to -o/stdout", "pg", "r", "cli,rest")
 COMMAND("pg send_pg_creates", "trigger pg creates to be issued",\
 	"pg", "rw", "cli,rest")
 COMMAND("pg dump " \
-	"name=dumpcontents,type=CephChoices,strings=all|summary|sum|pools|osds|pgs|pgs_brief,n=N,req=false", \
+	"name=dumpcontents,type=CephChoices,strings=all|summary|sum|delta|pools|osds|pgs|pgs_brief,n=N,req=false", \
 	"show human-readable versions of pg map", "pg", "r", "cli,rest")
 COMMAND("pg dump_json " \
 	"name=dumpcontents,type=CephChoices,strings=all|summary|sum|pools|osds|pgs,n=N,req=false", \
@@ -325,6 +325,11 @@ COMMAND("osd getmap " \
 COMMAND("osd getcrushmap " \
 	"name=epoch,type=CephInt,range=0,req=false", \
 	"get CRUSH map", "osd", "r", "cli,rest")
+COMMAND("osd perf", \
+        "print dump of OSD perf summary stats", \
+        "osd", \
+        "r", \
+        "cli,rest")
 COMMAND("osd getmaxosd", "show largest OSD id", "osd", "r", "cli,rest")
 COMMAND("osd find " \
 	"name=id,type=CephInt,range=0", \
@@ -364,13 +369,13 @@ COMMAND("osd crush set " \
 	"name=id,type=CephOsdName " \
 	"name=weight,type=CephFloat,range=0.0 " \
 	"name=args,type=CephString,n=N,goodchars=[A-Za-z0-9-_.=]", \
-	"set crushmap entry for <name> to <weight> with location <args>", \
+	"update crushmap position and weight for <name> to <weight> with location <args>", \
 	"osd", "rw", "cli,rest")
 COMMAND("osd crush add " \
 	"name=id,type=CephOsdName " \
 	"name=weight,type=CephFloat,range=0.0 " \
 	"name=args,type=CephString,n=N,goodchars=[A-Za-z0-9-_.=]", \
-	"add crushmap entry for <name> with <weight> and location <args>", \
+	"add or update crushmap position and weight for <name> with <weight> and location <args>", \
 	"osd", "rw", "cli,rest")
 COMMAND("osd crush create-or-move " \
 	"name=id,type=CephOsdName " \
@@ -510,6 +515,27 @@ COMMAND("osd reweight-by-utilization " \
 COMMAND("osd thrash " \
 	"name=num_epochs,type=CephInt,range=0", \
 	"thrash OSDs for <num_epochs>", "osd", "rw", "cli,rest")
+
+// tiering
+COMMAND("osd tier add " \
+	"name=pool,type=CephPoolname " \
+	"name=tierpool,type=CephPoolname",
+	"add the tier <tierpool> to base pool <pool>", "osd", "rw", "cli,rest")
+COMMAND("osd tier remove " \
+	"name=pool,type=CephPoolname " \
+	"name=tierpool,type=CephPoolname",
+	"remove the tier <tierpool> from base pool <pool>", "osd", "rw", "cli,rest")
+COMMAND("osd tier cache-mode " \
+	"name=pool,type=CephPoolname " \
+	"name=mode,type=CephChoices,strings=none|writeback|invalidate+forward|readonly", \
+	"specify the caching mode for cache tier <pool>", "osd", "rw", "cli,rest")
+COMMAND("osd tier set-overlay " \
+	"name=pool,type=CephPoolname " \
+	"name=overlaypool,type=CephPoolname", \
+	"set the overlay pool for base pool <pool> to be <overlaypool>", "osd", "rw", "cli,rest")
+COMMAND("osd tier remove-overlay " \
+	"name=pool,type=CephPoolname ", \
+	"remove the overlay pool for base pool <pool>", "osd", "rw", "cli,rest")
 
 /*
  * mon/ConfigKeyService.cc

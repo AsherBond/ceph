@@ -82,22 +82,25 @@ void librados::IoCtxImpl::complete_aio_write(AioCompletionImpl *c)
   aio_write_list_lock.Lock();
   assert(c->io == this);
   c->aio_write_list_item.remove_myself();
-  // queue async flush waiters
-  map<tid_t, std::list<AioCompletionImpl*> >::iterator waiters =
-    aio_write_waiters.find(c->aio_write_seq);
-  if (waiters != aio_write_waiters.end()) {
-    ldout(client->cct, 20) << "found " << waiters->second.size()
-			   << " waiters" << dendl;
+
+  map<tid_t, std::list<AioCompletionImpl*> >::iterator waiters = aio_write_waiters.begin();
+  while (waiters != aio_write_waiters.end()) {
+    if (!aio_write_list.empty() &&
+	aio_write_list.front()->aio_write_seq <= waiters->first) {
+      ldout(client->cct, 20) << " next outstanding write is " << aio_write_list.front()->aio_write_seq
+			     << " <= waiter " << waiters->first
+			     << ", stopping" << dendl;
+      break;
+    }
+    ldout(client->cct, 20) << " waking waiters on seq " << waiters->first << dendl;
     for (std::list<AioCompletionImpl*>::iterator it = waiters->second.begin();
 	 it != waiters->second.end(); ++it) {
       client->finisher.queue(new C_AioCompleteAndSafe(*it));
       (*it)->put();
     }
-    aio_write_waiters.erase(waiters);
-  } else {
-    ldout(client->cct, 20) << "found no waiters for tid "
-			   << c->aio_write_seq << dendl;
+    aio_write_waiters.erase(waiters++);
   }
+
   aio_write_cond.Signal();
   aio_write_list_lock.Unlock();
   put();
@@ -109,11 +112,13 @@ void librados::IoCtxImpl::flush_aio_writes_async(AioCompletionImpl *c)
 			 << " completion " << c << dendl;
   Mutex::Locker l(aio_write_list_lock);
   tid_t seq = aio_write_seq;
-  ldout(client->cct, 20) << "flush_aio_writes_async waiting on tid "
-			 << seq << dendl;
   if (aio_write_list.empty()) {
+    ldout(client->cct, 20) << "flush_aio_writes_async no writes. (tid "
+			   << seq << ")" << dendl;
     client->finisher.queue(new C_AioCompleteAndSafe(c));
   } else {
+    ldout(client->cct, 20) << "flush_aio_writes_async " << aio_write_list.size()
+			   << " writes in flight; waiting on tid " << seq << dendl;
     c->get();
     aio_write_waiters[seq].push_back(c);
   }
@@ -497,16 +502,16 @@ int librados::IoCtxImpl::operate(const object_t& oid, ::ObjectOperation *o,
   Cond cond;
   bool done;
   int r;
-  eversion_t ver;
+  version_t ver;
 
-  Context *onack = new C_SafeCond(&mylock, &cond, &done, &r);
+  Context *oncommit = new C_SafeCond(&mylock, &cond, &done, &r);
 
   int op = o->ops[0].op.op;
   ldout(client->cct, 10) << ceph_osd_op_name(op) << " oid=" << oid << " nspace=" << oloc.nspace << dendl;
   lock->Lock();
   objecter->mutate(oid, oloc,
 	           *o, snapc, ut, 0,
-	           onack, NULL, &ver);
+	           NULL, oncommit, &ver);
   lock->Unlock();
 
   mylock.Lock();
@@ -531,7 +536,7 @@ int librados::IoCtxImpl::operate_read(const object_t& oid,
   Cond cond;
   bool done;
   int r;
-  eversion_t ver;
+  version_t ver;
 
   Context *onack = new C_SafeCond(&mylock, &cond, &done, &r);
 
@@ -604,7 +609,6 @@ int librados::IoCtxImpl::aio_read(const object_t oid, AioCompletionImpl *c,
     return -EDOM;
 
   Context *onack = new C_aio_Ack(c);
-  eversion_t ver;
 
   c->is_read = true;
   c->io = this;
@@ -997,7 +1001,7 @@ int librados::IoCtxImpl::getxattrs(const object_t& oid,
   return r;
 }
 
-void librados::IoCtxImpl::set_sync_op_version(eversion_t& ver)
+void librados::IoCtxImpl::set_sync_op_version(version_t ver)
 {
   last_objver = ver;
 }
@@ -1011,7 +1015,7 @@ int librados::IoCtxImpl::watch(const object_t& oid, uint64_t ver,
   bool done;
   int r;
   Context *onfinish = new C_SafeCond(&mylock, &cond, &done, &r);
-  eversion_t objver;
+  version_t objver;
 
   lock->Lock();
 
@@ -1066,7 +1070,7 @@ int librados::IoCtxImpl::unwatch(const object_t& oid, uint64_t cookie)
   bool done;
   int r;
   Context *oncommit = new C_SafeCond(&mylock, &cond, &done, &r);
-  eversion_t ver;
+  version_t ver;
   lock->Lock();
 
   client->unregister_watcher(cookie);
@@ -1097,7 +1101,7 @@ int librados::IoCtxImpl::notify(const object_t& oid, uint64_t ver, bufferlist& b
   bool done, done_all;
   int r;
   Context *onack = new C_SafeCond(&mylock, &cond, &done, &r);
-  eversion_t objver;
+  version_t objver;
   uint64_t cookie;
   C_NotifyComplete *ctx = new C_NotifyComplete(&mylock_all, &cond_all, &done_all);
 
@@ -1139,7 +1143,7 @@ int librados::IoCtxImpl::notify(const object_t& oid, uint64_t ver, bufferlist& b
   return r;
 }
 
-eversion_t librados::IoCtxImpl::last_version()
+version_t librados::IoCtxImpl::last_version()
 {
   return last_objver;
 }

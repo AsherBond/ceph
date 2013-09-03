@@ -5,6 +5,7 @@
 
 #define dout_subsys ceph_subsys_mon
 #include "common/debug.h"
+#include "common/TextTable.h"
 #include "include/stringify.h"
 #include "common/Formatter.h"
 #include "include/ceph_features.h"
@@ -512,12 +513,17 @@ void PGMap::dump_basic(Formatter *f) const
   pg_sum.dump(f);
   f->close_section();
 
-  f->open_object_section("pg_stats_delta");
-  pg_sum_delta.dump(f);
-  f->close_section();
-  
   f->open_object_section("osd_stats_sum");
   osd_sum.dump(f);
+  f->close_section();
+
+  dump_delta(f);
+}
+
+void PGMap::dump_delta(Formatter *f) const
+{
+  f->open_object_section("pg_stats_delta");
+  pg_sum_delta.dump(f);
   f->close_section();
 }
 
@@ -698,6 +704,40 @@ void PGMap::dump_stuck_plain(ostream& ss, PGMap::StuckPG type, utime_t cutoff) c
   dump_pg_stats_plain(ss, stuck_pg_stats);
 }
 
+void PGMap::dump_osd_perf_stats(Formatter *f) const
+{
+  f->open_array_section("osd_perf_infos");
+  for (hash_map<int32_t, osd_stat_t>::const_iterator i = osd_stat.begin();
+       i != osd_stat.end();
+       ++i) {
+    f->open_object_section("osd");
+    f->dump_int("id", i->first);
+    {
+      f->open_object_section("perf_stats");
+      i->second.fs_perf_stat.dump(f);
+      f->close_section();
+    }
+    f->close_section();
+  }
+  f->close_section();
+}
+void PGMap::print_osd_perf_stats(std::ostream *ss) const
+{
+  TextTable tab;
+  tab.define_column("osdid", TextTable::LEFT, TextTable::RIGHT);
+  tab.define_column("fs_commit_latency(ms)", TextTable::LEFT, TextTable::RIGHT);
+  tab.define_column("fs_apply_latency(ms)", TextTable::LEFT, TextTable::RIGHT);
+  for (hash_map<int32_t, osd_stat_t>::const_iterator i = osd_stat.begin();
+       i != osd_stat.end();
+       ++i) {
+    tab << i->first;
+    tab << i->second.fs_perf_stat.filestore_commit_latency;
+    tab << i->second.fs_perf_stat.filestore_apply_latency;
+    tab << TextTable::endrow;
+  }
+  (*ss) << tab;
+}
+
 void PGMap::recovery_summary(Formatter *f, ostream *out) const
 {
   bool first = true;
@@ -711,7 +751,7 @@ void PGMap::recovery_summary(Formatter *f, ostream *out) const
       f->dump_string("degrated_ratio", b);
     } else {
       *out << pg_sum.stats.sum.num_objects_degraded 
-	   << "/" << pg_sum.stats.sum.num_object_copies << " degraded (" << b << "%)";
+	   << "/" << pg_sum.stats.sum.num_object_copies << " objects degraded (" << b << "%)";
     }
     first = false;
   }
@@ -731,7 +771,10 @@ void PGMap::recovery_summary(Formatter *f, ostream *out) const
     }
     first = false;
   }
+}
 
+void PGMap::recovery_rate_summary(Formatter *f, ostream *out) const
+{
   // make non-negative; we can get negative values if osds send
   // uncommitted stats and then "go backward" or if they are just
   // buggy/wrong.
@@ -748,13 +791,10 @@ void PGMap::recovery_summary(Formatter *f, ostream *out) const
       f->dump_int("recovering_bytes_per_sec", bps);
       f->dump_int("recovering_keys_per_sec", kps);
     } else {
-      if (!first)
-	*out << "; ";
-      *out << " recovering "
-	   << si_t(objps) << " o/s, "
-	   << si_t(bps) << "B/s";
+      *out << pretty_si_t(bps) << "B/s";
       if (pos_delta.stats.sum.num_keys_recovered)
-	*out << ", " << si_t(kps) << " key/s";
+	*out << ", " << pretty_si_t(kps) << "keys/s";
+      *out << ", " << pretty_si_t(objps) << "objects/s";
     }
   }
 }
@@ -802,9 +842,9 @@ void PGMap::print_summary(Formatter *f, ostream *out) const
       f->dump_unsigned("count", p->second);
       f->close_section();
     } else {
-      if (p != num_pg_by_state.begin())
-	ss << ", ";
-      ss << p->second << " " << pg_state_string(p->first);
+      ss.setf(std::ios::right);
+      ss << "             " << std::setw(7) << p->second << " " << pg_state_string(p->first) << "\n";
+      ss.unsetf(std::ios::right);
     }
   }
   if (f)
@@ -814,19 +854,33 @@ void PGMap::print_summary(Formatter *f, ostream *out) const
     f->dump_unsigned("version", version);
     f->dump_unsigned("num_pgs", pg_stat.size());
     f->dump_unsigned("data_bytes", pg_sum.stats.sum.num_bytes);
-    f->dump_unsigned("bytes_used", osd_sum.kb_used * 4096ull);
-    f->dump_unsigned("bytes_avail", osd_sum.kb_avail * 4096ull);
-    f->dump_unsigned("bytes_total", osd_sum.kb * 4096ull);
+    f->dump_unsigned("bytes_used", osd_sum.kb_used * 1024ull);
+    f->dump_unsigned("bytes_avail", osd_sum.kb_avail * 1024ull);
+    f->dump_unsigned("bytes_total", osd_sum.kb * 1024ull);
   } else {
-    string states = ss.str();
-    *out << "v" << version << ": "
-	 << pg_stat.size() << " pgs: "
-	 << states << "; "
-	 << prettybyte_t(pg_sum.stats.sum.num_bytes) << " data, " 
+    *out << "      pgmap v" << version << ": "
+	 << pg_stat.size() << " pgs, " << pg_pool_sum.size() << " pools, "
+	 << prettybyte_t(pg_sum.stats.sum.num_bytes) << " data, "
+	 << pretty_si_t(pg_sum.stats.sum.num_objects) << "objects\n";
+    *out << "            "
 	 << kb_t(osd_sum.kb_used) << " used, "
 	 << kb_t(osd_sum.kb_avail) << " / "
-	 << kb_t(osd_sum.kb) << " avail";
+	 << kb_t(osd_sum.kb) << " avail\n";
   }
+
+  std::stringstream ssr;
+  recovery_summary(f, &ssr);
+  if (!f && ssr.str().length())
+    *out << "            " << ssr.str() << "\n";
+  ssr.clear();
+  ssr.str("");
+
+  if (!f)
+    *out << ss.str();   // pgs by state
+
+  recovery_rate_summary(f, &ssr);
+  if (!f && ssr.str().length())
+    *out << "recovery io " << ssr.str() << "\n";
 
   // make non-negative; we can get negative values if osds send
   // uncommitted stats and then "go backward" or if they are just
@@ -836,13 +890,13 @@ void PGMap::print_summary(Formatter *f, ostream *out) const
   if (pos_delta.stats.sum.num_rd ||
       pos_delta.stats.sum.num_wr) {
     if (!f)
-      *out << "; ";
+      *out << "  client io ";
     if (pos_delta.stats.sum.num_rd) {
       int64_t rd = (pos_delta.stats.sum.num_rd_kb << 10) / (double)stamp_delta;
       if (f) {
 	f->dump_int("read_bytes_sec", rd);
       } else {
-	*out << si_t(rd) << "B/s rd, ";
+	*out << pretty_si_t(rd) << "B/s rd, ";
       }
     }
     if (pos_delta.stats.sum.num_wr) {
@@ -850,21 +904,70 @@ void PGMap::print_summary(Formatter *f, ostream *out) const
       if (f) {
 	f->dump_int("write_bytes_sec", wr);
       } else {
-	*out << si_t(wr) << "B/s wr, ";
+	*out << pretty_si_t(wr) << "B/s wr, ";
       }
     }
     int64_t iops = (pos_delta.stats.sum.num_rd + pos_delta.stats.sum.num_wr) / (double)stamp_delta;
     if (f) {
       f->dump_int("op_per_sec", iops);
     } else {
-      *out << si_t(iops) << "op/s";
+      *out << pretty_si_t(iops) << "op/s";
+      *out << "\n";
     }
   }
 
+}
+
+void PGMap::print_oneline_summary(ostream *out) const
+{
+  std::stringstream ss;
+
+  for (hash_map<int,int>::const_iterator p = num_pg_by_state.begin();
+       p != num_pg_by_state.end();
+       ++p) {
+    if (p != num_pg_by_state.begin())
+      ss << ", ";
+    ss << p->second << " " << pg_state_string(p->first);
+  }
+
+  string states = ss.str();
+  *out << "v" << version << ": "
+       << pg_stat.size() << " pgs: "
+       << states << "; "
+       << prettybyte_t(pg_sum.stats.sum.num_bytes) << " data, "
+       << kb_t(osd_sum.kb_used) << " used, "
+       << kb_t(osd_sum.kb_avail) << " / "
+       << kb_t(osd_sum.kb) << " avail";
+
+  // make non-negative; we can get negative values if osds send
+  // uncommitted stats and then "go backward" or if they are just
+  // buggy/wrong.
+  pool_stat_t pos_delta = pg_sum_delta;
+  pos_delta.floor(0);
+  if (pos_delta.stats.sum.num_rd ||
+      pos_delta.stats.sum.num_wr) {
+    *out << "; ";
+    if (pos_delta.stats.sum.num_rd) {
+      int64_t rd = (pos_delta.stats.sum.num_rd_kb << 10) / (double)stamp_delta;
+      *out << pretty_si_t(rd) << "B/s rd, ";
+    }
+    if (pos_delta.stats.sum.num_wr) {
+      int64_t wr = (pos_delta.stats.sum.num_wr_kb << 10) / (double)stamp_delta;
+      *out << pretty_si_t(wr) << "B/s wr, ";
+    }
+    int64_t iops = (pos_delta.stats.sum.num_rd + pos_delta.stats.sum.num_wr) / (double)stamp_delta;
+    *out << pretty_si_t(iops) << "op/s";
+  }
+
   std::stringstream ssr;
-  recovery_summary(f, &ssr);
-  if (!f && ssr.str().length())
+  recovery_summary(NULL, &ssr);
+  if (ssr.str().length())
     *out << "; " << ssr.str();
+  ssr.clear();
+  ssr.str("");
+  recovery_rate_summary(NULL, &ssr);
+  if (ssr.str().length())
+    *out << "; " << ssr.str() << " recovering";
 }
 
 void PGMap::generate_test_instances(list<PGMap*>& o)

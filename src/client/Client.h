@@ -59,13 +59,13 @@ class MClientRequest;
 class MClientSession;
 class MClientRequest;
 class MClientRequestForward;
-class MClientLease;
+struct MClientLease;
 class MClientCaps;
 class MClientCapRelease;
 
-class DirStat;
-class LeaseStat;
-class InodeStat;
+struct DirStat;
+struct LeaseStat;
+struct InodeStat;
 
 class Filer;
 class Objecter;
@@ -110,12 +110,12 @@ class Inode;
 struct Cap;
 class Dir;
 class Dentry;
-class SnapRealm;
-class Fh;
-class CapSnap;
+struct SnapRealm;
+struct Fh;
+struct CapSnap;
 
-class MetaSession;
-class MetaRequest;
+struct MetaSession;
+struct MetaRequest;
 
 
 typedef void (*client_ino_callback_t)(void *handle, vinodeno_t ino, int64_t off, int64_t len);
@@ -439,7 +439,7 @@ protected:
   void maybe_update_snaprealm(SnapRealm *realm, snapid_t snap_created, snapid_t snap_highwater, 
 			      vector<snapid_t>& snaps);
 
-  void handle_snap(class MClientSnap *m);
+  void handle_snap(struct MClientSnap *m);
   void handle_caps(class MClientCaps *m);
   void handle_cap_import(MetaSession *session, Inode *in, class MClientCaps *m);
   void handle_cap_export(MetaSession *session, Inode *in, class MClientCaps *m);
@@ -560,6 +560,7 @@ private:
   int _flush(Fh *fh);
   int _fsync(Fh *fh, bool syncdataonly);
   int _sync_fs();
+  int _fallocate(Fh *fh, int mode, int64_t offset, int64_t length);
 
   int get_or_create(Inode *dir, const char* name,
 		    Dentry **pdn, bool expect_null=false);
@@ -658,6 +659,7 @@ public:
   int ftruncate(int fd, loff_t size);
   int fsync(int fd, bool syncdataonly);
   int fstat(int fd, struct stat *stbuf);
+  int fallocate(int fd, int mode, loff_t offset, loff_t length);
 
   // full path xattr ops
   int getxattr(const char *path, const char *name, void *value, size_t size);
@@ -727,6 +729,7 @@ public:
   int ll_write(Fh *fh, loff_t off, loff_t len, const char *data);
   int ll_flush(Fh *fh);
   int ll_fsync(Fh *fh, bool syncdataonly);
+  int ll_fallocate(Fh *fh, int mode, loff_t offset, loff_t length);
   int ll_release(Fh *fh);
   int ll_statfs(vinodeno_t vino, struct statvfs *stbuf);
 

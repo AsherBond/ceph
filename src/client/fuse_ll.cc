@@ -400,6 +400,20 @@ static void fuse_ll_ioctl(fuse_req_t req, fuse_ino_t ino, int cmd, void *arg, st
 }
 #endif
 
+#if FUSE_VERSION > FUSE_MAKE_VERSION(2, 9)
+
+static void fuse_ll_fallocate(fuse_req_t req, fuse_ino_t ino, int mode,
+                              off_t offset, off_t length,
+                              struct fuse_file_info *fi)
+{
+  CephFuse::Handle *cfuse = (CephFuse::Handle *)fuse_req_userdata(req);
+  Fh *fh = (Fh*)fi->fh;
+  int r = cfuse->client->ll_fallocate(fh, mode, offset, length);
+  fuse_reply_err(req, -r);
+}
+
+#endif
+
 static void fuse_ll_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
 {
   CephFuse::Handle *cfuse = (CephFuse::Handle *)fuse_req_userdata(req);
@@ -539,9 +553,9 @@ static int getgroups_cb(void *handle, uid_t uid, gid_t **sgids)
 
 static void invalidate_cb(void *handle, vinodeno_t vino, int64_t off, int64_t len)
 {
+#if FUSE_VERSION >= FUSE_MAKE_VERSION(2, 8)
   CephFuse::Handle *cfuse = (CephFuse::Handle *)handle;
   fuse_ino_t fino = cfuse->make_fake_ino(vino.ino, vino.snapid);
-#if FUSE_VERSION >= FUSE_MAKE_VERSION(2, 8)
   fuse_lowlevel_notify_inval_inode(cfuse->ch, fino, off, len);
 #endif
 }
@@ -602,8 +616,20 @@ const static struct fuse_lowlevel_ops fuse_ll_oper = {
  getlk: 0,
  setlk: 0,
  bmap: 0,
+#if FUSE_VERSION >= FUSE_MAKE_VERSION(2, 8)
 #ifdef FUSE_IOCTL_COMPAT
  ioctl: fuse_ll_ioctl,
+#else
+ ioctl: 0,
+#endif
+ poll: 0,
+#if FUSE_VERSION > FUSE_MAKE_VERSION(2, 9)
+ write_buf: 0,
+ retrieve_reply: 0,
+ forget_multi: 0,
+ flock: 0,
+ fallocate: fuse_ll_fallocate
+#endif
 #endif
 };
 

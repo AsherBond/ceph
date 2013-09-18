@@ -202,9 +202,7 @@ Installing Ceph Object Storage
 	ServerName {FQDN}
 	
 	
-#. Create an Apache httpd virtual host in ``/etc/httpd/conf.d/rgw.conf``.
-
-.. code-block:: ini
+#. Create an Apache httpd virtual host in ``/etc/httpd/conf.d/rgw.conf``. ::
 
 	FastCgiExternalServer /var/www/s3gw.fcgi -socket /tmp/radosgw.sock
 	<VirtualHost *:80>
@@ -235,7 +233,7 @@ Installing Ceph Object Storage
 	#FastCgiWrapper On
 
 
-#. Add a ``fastcgi`` script. ::
+#. Add a ``fastcgi`` script with the following path ``/var/www/s3gw.fcgi``. ::
 
 	#!/bin/sh 
 	exec /usr/bin/radosgw -c /etc/ceph/ceph.conf -n client.radosgw.gateway
@@ -243,7 +241,7 @@ Installing Ceph Object Storage
 	
 #. Make ``s3gw.fcgi`` executable::
 	
-	chmod +x /var/www/rgw/s3gw.fcgi
+	chmod +x /var/www/s3gw.fcgi
 
 
 #. Create a user key. ::

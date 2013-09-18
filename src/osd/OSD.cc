@@ -134,8 +134,6 @@ static ostream& _prefix(std::ostream* _dout, int whoami, OSDMapRef osdmap) {
 		<< " ";
 }
 
-const coll_t coll_t::META_COLL("meta");
-
 static CompatSet get_osd_compat_set() {
   CompatSet::FeatureSet ceph_osd_feature_compat;
   CompatSet::FeatureSet ceph_osd_feature_ro_compat;
@@ -2541,7 +2539,12 @@ void OSDService::check_nearfull_warning(const osd_stat_t &osd_stat)
 
   time_t now = ceph_clock_gettime(NULL);
 
-  float ratio = ((float)osd_stat.kb_used) / ((float)osd_stat.kb);
+  // We base ratio on kb_avail rather than kb_used because they can
+  // differ significantly e.g. on btrfs volumes with a large number of
+  // chunks reserved for metadata, and for our purposes (avoiding
+  // completely filling the disk) it's far more important to know how
+  // much space is available to use than how much we've already used.
+  float ratio = ((float)(osd_stat.kb - osd_stat.kb_avail)) / ((float)osd_stat.kb);
   float nearfull_ratio = get_nearfull_ratio();
   float full_ratio = get_full_ratio();
   cur_ratio = ratio;

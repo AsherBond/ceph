@@ -66,8 +66,7 @@ endif
 bin_PROGRAMS += ceph-dencoder
 
 get_command_descriptions_SOURCES = test/common/get_command_descriptions.cc
-get_command_descriptions_CXXFLAGS = $(UNITTEST_CXXFLAGS)
-get_command_descriptions_LDADD = $(LIBMON) $(LIBCOMMON) $(UNITTEST_LDADD) $(CEPH_GLOBAL)
+get_command_descriptions_LDADD = $(LIBMON) $(LIBCOMMON) $(CEPH_GLOBAL)
 noinst_PROGRAMS += get_command_descriptions
 
 
@@ -234,8 +233,8 @@ bin_DEBUGPROGRAMS += ceph_bench_log
 ## Unit tests
 
 check_SCRIPTS += \
-	$(srcdir)/unittest_bufferlist.sh \
-	$(srcdir)/test/encoding/check-generated.sh
+	unittest_bufferlist.sh \
+	test/encoding/check-generated.sh
 
 # target to build but not run the unit tests
 unittests:: $(check_PROGRAMS)

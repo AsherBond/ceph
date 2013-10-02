@@ -981,7 +981,7 @@ void ReplicatedPG::do_op(OpRequestRef op)
     return;
   }
 
-  if ((op->may_read()) && (obc->obs.oi.lost)) {
+  if ((op->may_read()) && (obc->obs.oi.is_lost())) {
     // This object is lost. Reading from it returns an error.
     dout(20) << __func__ << ": object " << obc->obs.oi.soid
 	     << " is lost" << dendl;
@@ -991,7 +991,8 @@ void ReplicatedPG::do_op(OpRequestRef op)
   dout(25) << __func__ << ": object " << obc->obs.oi.soid
 	   << " has oi of " << obc->obs.oi << dendl;
   
-  if (!op->may_write() && !obc->obs.exists) {
+  if (!op->may_write() && (!obc->obs.exists ||
+			   obc->obs.oi.is_whiteout())) {
     osd->reply_op_error(op, -ENOENT);
     return;
   }
@@ -1048,6 +1049,8 @@ void ReplicatedPG::do_op(OpRequestRef op)
 	  wait_for_missing_object(wait_oid, op);
 	} else if (r) {
 	  osd->reply_op_error(op, r);
+	} else if (sobc->obs.oi.is_whiteout()) {
+	  osd->reply_op_error(op, -ENOENT);
 	} else {
 	  if (sobc->obs.oi.soid.get_key() != obc->obs.oi.soid.get_key() &&
 		   sobc->obs.oi.soid.get_key() != obc->obs.oi.soid.oid.name &&
@@ -1102,6 +1105,8 @@ void ReplicatedPG::do_op(OpRequestRef op)
 	  wait_for_missing_object(wait_oid, op);
 	} else if (r) {
 	  osd->reply_op_error(op, r);
+	} else if (sobc->obs.oi.is_whiteout()) {
+	  osd->reply_op_error(op, -ENOENT);
 	} else {
 	  dout(10) << " clone_oid " << clone_oid << " obc " << sobc << dendl;
 	  src_obc[clone_oid] = sobc;
@@ -2629,6 +2634,25 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
       }
       break;
 
+    case CEPH_OSD_OP_ISDIRTY:
+      ++ctx->num_read;
+      {
+	bool is_dirty = obs.oi.is_dirty();
+	::encode(is_dirty, osd_op.outdata);
+	ctx->delta_stats.num_rd++;
+	result = 0;
+      }
+      break;
+
+    case CEPH_OSD_OP_UNDIRTY:
+      ++ctx->num_write;
+      {
+	ctx->undirty = true;  // see make_writeable()
+	ctx->modify = true;
+	ctx->delta_stats.num_wr++;
+      }
+      break;
+
     case CEPH_OSD_OP_GETXATTR:
       ++ctx->num_read;
       {
@@ -2744,8 +2768,8 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  result = -ERANGE;
 	else if (ver > oi.user_version)
 	  result = -EOVERFLOW;
-	break;
       }
+      break;
 
     case CEPH_OSD_OP_LIST_WATCHERS:
       ++ctx->num_read;
@@ -3053,7 +3077,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	}
       }
       break;
-      
+
     case CEPH_OSD_OP_TRIMTRUNC:
       op.extent.offset = op.extent.truncate_size;
       // falling through
@@ -3285,7 +3309,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 
 	if (cct->_conf->osd_tmapput_sets_uses_tmap) {
 	  assert(cct->_conf->osd_auto_upgrade_tmap);
-	  oi.uses_tmap = true;
+	  oi.set_flag(object_info_t::FLAG_USES_TMAP);
 	}
 
 	// write it
@@ -3333,7 +3357,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	}
 	set<string> out_set;
 
-	if (oi.uses_tmap && cct->_conf->osd_auto_upgrade_tmap) {
+	if (oi.test_flag(object_info_t::FLAG_USES_TMAP) && cct->_conf->osd_auto_upgrade_tmap) {
 	  dout(20) << "CEPH_OSD_OP_OMAPGETKEYS: "
 		   << " Reading " << oi.soid << " omap from tmap" << dendl;
 	  map<string, bufferlist> vals;
@@ -3391,7 +3415,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	}
 	map<string, bufferlist> out_set;
 
-	if (oi.uses_tmap && cct->_conf->osd_auto_upgrade_tmap) {
+	if (oi.test_flag(object_info_t::FLAG_USES_TMAP) && cct->_conf->osd_auto_upgrade_tmap) {
 	  dout(20) << "CEPH_OSD_OP_OMAPGETVALS: "
 		   << " Reading " << oi.soid << " omap from tmap" << dendl;
 	  map<string, bufferlist> vals;
@@ -3442,7 +3466,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
     case CEPH_OSD_OP_OMAPGETHEADER:
       ++ctx->num_read;
       {
-	if (oi.uses_tmap && cct->_conf->osd_auto_upgrade_tmap) {
+	if (oi.test_flag(object_info_t::FLAG_USES_TMAP) && cct->_conf->osd_auto_upgrade_tmap) {
 	  dout(20) << "CEPH_OSD_OP_OMAPGETHEADER: "
 		   << " Reading " << oi.soid << " omap from tmap" << dendl;
 	  map<string, bufferlist> vals;
@@ -3473,7 +3497,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  goto fail;
 	}
 	map<string, bufferlist> out;
-	if (oi.uses_tmap && cct->_conf->osd_auto_upgrade_tmap) {
+	if (oi.test_flag(object_info_t::FLAG_USES_TMAP) && cct->_conf->osd_auto_upgrade_tmap) {
 	  dout(20) << "CEPH_OSD_OP_OMAPGET: "
 		   << " Reading " << oi.soid << " omap from tmap" << dendl;
 	  map<string, bufferlist> vals;
@@ -3572,7 +3596,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
     case CEPH_OSD_OP_OMAPSETVALS:
       ++ctx->num_write;
       {
-	if (oi.uses_tmap && cct->_conf->osd_auto_upgrade_tmap) {
+	if (oi.test_flag(object_info_t::FLAG_USES_TMAP) && cct->_conf->osd_auto_upgrade_tmap) {
 	  _copy_up_tmap(ctx);
 	}
 	if (!obs.exists) {
@@ -3602,7 +3626,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
     case CEPH_OSD_OP_OMAPSETHEADER:
       ++ctx->num_write;
       {
-	if (oi.uses_tmap && cct->_conf->osd_auto_upgrade_tmap) {
+	if (oi.test_flag(object_info_t::FLAG_USES_TMAP) && cct->_conf->osd_auto_upgrade_tmap) {
 	  _copy_up_tmap(ctx);
 	}
 	if (!obs.exists) {
@@ -3622,7 +3646,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  result = -ENOENT;
 	  break;
 	}
-	if (oi.uses_tmap && cct->_conf->osd_auto_upgrade_tmap) {
+	if (oi.test_flag(object_info_t::FLAG_USES_TMAP) && cct->_conf->osd_auto_upgrade_tmap) {
 	  _copy_up_tmap(ctx);
 	}
 	t.touch(coll, soid);
@@ -3638,7 +3662,7 @@ int ReplicatedPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  result = -ENOENT;
 	  break;
 	}
-	if (oi.uses_tmap && cct->_conf->osd_auto_upgrade_tmap) {
+	if (oi.test_flag(object_info_t::FLAG_USES_TMAP) && cct->_conf->osd_auto_upgrade_tmap) {
 	  _copy_up_tmap(ctx);
 	}
 	t.touch(coll, soid);
@@ -3817,7 +3841,7 @@ int ReplicatedPG::_get_tmap(OpContext *ctx,
 int ReplicatedPG::_copy_up_tmap(OpContext *ctx)
 {
   dout(20) << "copying up tmap for " << ctx->new_obs.oi.soid << dendl;
-  ctx->new_obs.oi.uses_tmap = false;
+  ctx->new_obs.oi.clear_flag(object_info_t::FLAG_USES_TMAP);
   map<string, bufferlist> vals;
   bufferlist header;
   int r = _get_tmap(ctx, &vals, &header);
@@ -3877,11 +3901,11 @@ int ReplicatedPG::_rollback_to(OpContext *ctx, ceph_osd_op& op)
     hobject_t(soid.oid, soid.get_key(), snapid, soid.hash, info.pgid.pool(), soid.get_namespace()),
     &rollback_to, false, &cloneid);
   if (ret) {
-    if (-ENOENT == ret) {
+    if (-ENOENT == ret || rollback_to->obs.oi.is_whiteout()) {
       // there's no snapshot here, or there's no object.
       // if there's no snapshot, we delete the object; otherwise, do nothing.
       dout(20) << "_rollback_to deleting head on " << soid.oid
-	       << " because got ENOENT on find_object_context" << dendl;
+	       << " because got ENOENT|whiteout on find_object_context" << dendl;
       if (ctx->obc->obs.oi.watchers.size()) {
 	// Cannot delete an object with watchers
 	ret = -EBUSY;
@@ -3982,6 +4006,15 @@ void ReplicatedPG::make_writeable(OpContext *ctx)
   dout(20) << "make_writeable " << soid << " snapset=" << ctx->snapset
 	   << "  snapc=" << snapc << dendl;;
   
+  // we will mark the object dirty
+  if (ctx->undirty) {
+    dout(20) << " clearing DIRTY flag" << dendl;
+    ctx->new_obs.oi.clear_flag(object_info_t::FLAG_DIRTY);
+  } else {
+    dout(20) << " setting DIRTY flag" << dendl;
+    ctx->new_obs.oi.set_flag(object_info_t::FLAG_DIRTY);
+  }
+
   // use newer snapc?
   if (ctx->new_snapset.seq > snapc.seq) {
     snapc.seq = ctx->new_snapset.seq;
@@ -7106,7 +7139,7 @@ ObjectContextRef ReplicatedPG::mark_object_lost(ObjectStore::Transaction *t,
 
   obc->ondisk_write_lock();
 
-  obc->obs.oi.lost = true;
+  obc->obs.oi.set_flag(object_info_t::FLAG_LOST);
   obc->obs.oi.version = info.last_update;
   obc->obs.oi.prior_version = version;
 

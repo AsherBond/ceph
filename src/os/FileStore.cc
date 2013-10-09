@@ -201,7 +201,9 @@ int FileStore::lfn_open(coll_t cid,
 			IndexedPath *path,
 			Index *index) 
 {
-  assert(get_allow_sharded_objects() || oid.shard_id == ghobject_t::NO_SHARD);
+  assert(get_allow_sharded_objects() ||
+	 ( oid.shard_id == ghobject_t::NO_SHARD &&
+	   oid.generation == ghobject_t::NO_GEN ));
   assert(outfd);
   int flags = O_RDWR;
   if (create)
@@ -3464,6 +3466,8 @@ int FileStore::getattrs(coll_t cid, const ghobject_t& oid, map<string,bufferptr>
     dout(10) << __func__ << " could not get omap_attrs r = " << r << dendl;
     goto out;
   }
+  if (r == -ENOENT)
+    r = 0;
   assert(omap_attrs.size() == omap_aset.size());
   for (map<string, bufferlist>::iterator i = omap_aset.begin();
 	 i != omap_aset.end();
@@ -3651,6 +3655,8 @@ int FileStore::_rmattrs(coll_t cid, const ghobject_t& oid,
     dout(10) << __func__ << " could not remove omap_attrs r = " << r << dendl;
     return r;
   }
+  if (r == -ENOENT)
+    r = 0;
  out:
   dout(10) << "rmattrs " << cid << "/" << oid << " = " << r << dendl;
   return r;

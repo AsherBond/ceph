@@ -661,6 +661,9 @@ OPTION(rgw_swift_auth_url, OPT_STR, "")        // default URL to go and verify t
 OPTION(rgw_swift_auth_entry, OPT_STR, "auth")  // entry point for which a url is considered a swift auth url
 OPTION(rgw_keystone_url, OPT_STR, "")  // url for keystone server
 OPTION(rgw_keystone_admin_token, OPT_STR, "")  // keystone admin token (shared secret)
+OPTION(rgw_keystone_admin_user, OPT_STR, "")  // keystone admin user name
+OPTION(rgw_keystone_admin_password, OPT_STR, "")  // keystone admin user password
+OPTION(rgw_keystone_admin_tenant, OPT_STR, "")  // keystone admin user tenant
 OPTION(rgw_keystone_accepted_roles, OPT_STR, "Member, admin")  // roles required to serve requests
 OPTION(rgw_keystone_token_cache_size, OPT_INT, 10000)  // max number of entries in keystone token cache
 OPTION(rgw_keystone_revocation_interval, OPT_INT, 15 * 60)  // seconds between tokens revocation check
@@ -709,6 +712,7 @@ OPTION(rgw_exit_timeout_secs, OPT_INT, 120) // how many seconds to wait for proc
 OPTION(rgw_get_obj_window_size, OPT_INT, 16 << 20) // window size in bytes for single get obj request
 OPTION(rgw_get_obj_max_req_size, OPT_INT, 4 << 20) // max length of a single get obj rados op
 OPTION(rgw_relaxed_s3_bucket_names, OPT_BOOL, false) // enable relaxed bucket name rules for US region buckets
+OPTION(rgw_defer_to_bucket_acls, OPT_STR, "") // if the user has bucket perms, use those before key perms (recurse and full_control)
 OPTION(rgw_list_buckets_max_chunk, OPT_INT, 1000) // max buckets to retrieve in a single op when listing user buckets
 OPTION(rgw_md_log_max_shards, OPT_INT, 64) // max shards for metadata log
 OPTION(rgw_num_zone_opstate_shards, OPT_INT, 128) // max shards for keeping inter-region copy progress info

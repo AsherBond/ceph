@@ -440,7 +440,7 @@ unittest_crc32c_LDADD = $(UNITTEST_LDADD) $(CEPH_GLOBAL)
 unittest_crc32c_CXXFLAGS = $(UNITTEST_CXXFLAGS)
 check_PROGRAMS += unittest_crc32c
 
-unittest_arch_SOURCES = test/test_arch.c
+unittest_arch_SOURCES = test/test_arch.cc
 unittest_arch_LDADD = $(UNITTEST_LDADD) $(CEPH_GLOBAL)
 unittest_arch_CXXFLAGS = $(UNITTEST_CXXFLAGS)
 check_PROGRAMS += unittest_arch
@@ -859,6 +859,13 @@ bin_DEBUGPROGRAMS += ceph_test_keyvaluedb_iterators
 ceph_test_cfuse_cache_invalidate_SOURCES = test/test_cfuse_cache_invalidate.cc
 bin_DEBUGPROGRAMS += ceph_test_cfuse_cache_invalidate
 
+ceph_test_c_headers_SOURCES = test/test_c_headers.c
+ceph_test_c_headers_LDADD = $(LIBRADOS) $(LIBCEPHFS)
+bin_DEBUGPROGRAMS += ceph_test_c_headers
+
+ceph_test_get_blkdev_size_SOURCES = test/test_get_blkdev_size.cc
+ceph_test_get_blkdev_size_LDADD = $(LIBCOMMON)
+bin_DEBUGPROGRAMS += ceph_test_get_blkdev_size
 
 noinst_HEADERS += \
 	test/osd/RadosModel.h \

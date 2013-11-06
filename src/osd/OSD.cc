@@ -900,7 +900,7 @@ OSD::OSD(CephContext *cct_, int id, Messenger *internal_messenger, Messenger *ex
   replay_queue_lock("OSD::replay_queue_lock"),
   snap_trim_wq(this, cct->_conf->osd_snap_trim_thread_timeout, &disk_tp),
   scrub_wq(this, cct->_conf->osd_scrub_thread_timeout, &disk_tp),
-  scrub_finalize_wq(this, cct->_conf->osd_scrub_finalize_thread_timeout, &op_tp),
+  scrub_finalize_wq(cct->_conf->osd_scrub_finalize_thread_timeout, &op_tp),
   rep_scrub_wq(this, cct->_conf->osd_scrub_thread_timeout, &disk_tp),
   remove_wq(store, cct->_conf->osd_remove_thread_timeout, &disk_tp),
   next_removal_seq(0),
@@ -6762,7 +6762,9 @@ void OSD::do_recovery(PG *pg, ThreadPool::TPHandle &handle)
 #endif
     
     PG::RecoveryCtx rctx = create_context();
-    int started = pg->start_recovery_ops(max, &rctx, handle);
+
+    int started;
+    bool more = pg->start_recovery_ops(max, &rctx, handle, &started);
     dout(10) << "do_recovery started " << started << "/" << max << " on " << *pg << dendl;
 
     /*
@@ -6771,7 +6773,7 @@ void OSD::do_recovery(PG *pg, ThreadPool::TPHandle &handle)
      * It may be that our initial locations were bad and we errored
      * out while trying to pull.
      */
-    if (!started && pg->have_unfound()) {
+    if (!more && pg->have_unfound()) {
       pg->discover_all_missing(*rctx.query_map);
       if (rctx.query_map->empty()) {
 	dout(10) << "do_recovery  no luck, giving up on this pg for now" << dendl;

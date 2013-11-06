@@ -1160,6 +1160,16 @@ bool OSDMonitor::preprocess_boot(MOSDBoot *m)
     return true;
   }
 
+  if (osdmap.exists(from) &&
+      !osdmap.get_uuid(from).is_zero() &&
+      osdmap.get_uuid(from) != m->sb.osd_fsid) {
+    dout(7) << __func__ << " from " << m->get_orig_source_inst()
+            << " clashes with existing osd: different fsid"
+            << " (ours: " << osdmap.get_uuid(from)
+            << " ; theirs: " << m->sb.osd_fsid << ")" << dendl;
+    goto ignore;
+  }
+
   // noup?
   if (!can_mark_up(from)) {
     dout(7) << "preprocess_boot ignoring boot from " << m->get_orig_source_inst() << dendl;
@@ -1200,7 +1210,9 @@ bool OSDMonitor::prepare_boot(MOSDBoot *m)
   // already up?  mark down first?
   if (osdmap.is_up(from)) {
     dout(7) << "prepare_boot was up, first marking down " << osdmap.get_inst(from) << dendl;
-    assert(osdmap.get_inst(from) != m->get_orig_source_inst());  // preproces should have caught it
+    // preprocess should have caught these;  if not, assert.
+    assert(osdmap.get_inst(from) != m->get_orig_source_inst());
+    assert(osdmap.get_uuid(from) == m->sb.osd_fsid);
     
     if (pending_inc.new_state.count(from) == 0 ||
 	(pending_inc.new_state[from] & CEPH_OSD_UP) == 0) {
@@ -1239,8 +1251,11 @@ bool OSDMonitor::prepare_boot(MOSDBoot *m)
 
     // set uuid?
     dout(10) << " setting osd." << from << " uuid to " << m->sb.osd_fsid << dendl;
-    if (!osdmap.exists(from) || osdmap.get_uuid(from) != m->sb.osd_fsid)
+    if (!osdmap.exists(from) || osdmap.get_uuid(from) != m->sb.osd_fsid) {
+      // preprocess should have caught this;  if not, assert.
+      assert(!osdmap.exists(from) || osdmap.get_uuid(from).is_zero());
       pending_inc.new_uuid[from] = m->sb.osd_fsid;
+    }
 
     // fresh osd?
     if (m->sb.newest_map == 0 && osdmap.exists(from)) {
@@ -2793,7 +2808,9 @@ int OSDMonitor::prepare_command_pool_set(map<string,cmd_vartype> &cmdmap,
       ss << "error parsing integer value '" << val << "': " << interr;
       return -EINVAL;
     }
-    if (n > (int)p.get_pg_num()) {
+    if (n <= 0) {
+      ss << "specified pgp_num must > 0, but you set to " << n;
+    } else if (n > (int)p.get_pg_num()) {
       ss << "specified pgp_num " << n << " > pg_num " << p.get_pg_num();
     } else if (!mon->pgmon()->pg_map.creating_pgs.empty()) {
       ss << "still creating pgs, wait";
@@ -2921,7 +2938,7 @@ bool OSDMonitor::prepare_command(MMonCommand *m)
     // sanity check: test some inputs to make sure this map isn't totally broken
     dout(10) << " testing map" << dendl;
     stringstream ess;
-    CrushTester tester(crush, ess, 1);
+    CrushTester tester(crush, ess);
     tester.test();
     dout(10) << " result " << ess.str() << dendl;
 
@@ -3469,13 +3486,15 @@ bool OSDMonitor::prepare_command(MMonCommand *m)
 	}
       } else if (prefix == "osd rm") {
 	if (osdmap.is_up(osd)) {
-	ss << "osd." << osd << " is still up; must be down before removal. ";
+          ss << "osd." << osd << " is still up; must be down before removal. ";
 	} else {
 	  pending_inc.new_state[osd] = osdmap.get_state(osd);
-	  if (any)
+          pending_inc.new_uuid[osd] = uuid_d();
+	  if (any) {
 	    ss << ", osd." << osd;
-	  else 
+          } else {
 	    ss << "removed osd." << osd;
+          }
 	  any = true;
 	}
       }
@@ -3784,25 +3803,43 @@ done:
     string srcpoolstr, destpoolstr;
     cmd_getval(g_ceph_context, cmdmap, "srcpool", srcpoolstr);
     cmd_getval(g_ceph_context, cmdmap, "destpool", destpoolstr);
-    int64_t pool = osdmap.lookup_pg_pool_name(srcpoolstr.c_str());
-    if (pool < 0) {
-      ss << "unrecognized pool '" << srcpoolstr << "'";
-      err = -ENOENT;
-    } else if (osdmap.lookup_pg_pool_name(destpoolstr.c_str()) >= 0) {
+    int64_t pool_src = osdmap.lookup_pg_pool_name(srcpoolstr.c_str());
+    int64_t pool_dst = osdmap.lookup_pg_pool_name(destpoolstr.c_str());
+
+    if (pool_src < 0) {
+      if (pool_dst >= 0) {
+        // src pool doesn't exist, dst pool does exist: to ensure idempotency
+        // of operations, assume this rename succeeded, as it is not changing
+        // the current state.  Make sure we output something understandable
+        // for whoever is issuing the command, if they are paying attention,
+        // in case it was not intentional; or to avoid a "wtf?" and a bug
+        // report in case it was intentional, while expecting a failure.
+        ss << "pool '" << srcpoolstr << "' does not exist; pool '"
+          << destpoolstr << "' does -- assuming successful rename";
+        err = 0;
+      } else {
+        ss << "unrecognized pool '" << srcpoolstr << "'";
+        err = -ENOENT;
+      }
+      goto reply;
+    } else if (pool_dst >= 0) {
+      // source pool exists and so does the destination pool
       ss << "pool '" << destpoolstr << "' already exists";
       err = -EEXIST;
-    } else {
-      int ret = _prepare_rename_pool(pool, destpoolstr);
-      if (ret == 0) {
-	ss << "pool '" << srcpoolstr << "' renamed to '" << destpoolstr << "'";
-      } else {
-	ss << "failed to rename pool '" << srcpoolstr << "' to '" << destpoolstr << "': "
-	   << cpp_strerror(ret);
-      }
-      getline(ss, rs);
-      wait_for_finished_proposal(new Monitor::C_Command(mon, m, ret, rs, get_last_committed()));
-      return true;
+      goto reply;
     }
+
+    int ret = _prepare_rename_pool(pool_src, destpoolstr);
+    if (ret == 0) {
+      ss << "pool '" << srcpoolstr << "' renamed to '" << destpoolstr << "'";
+    } else {
+      ss << "failed to rename pool '" << srcpoolstr << "' to '" << destpoolstr << "': "
+        << cpp_strerror(ret);
+    }
+    getline(ss, rs);
+    wait_for_finished_proposal(new Monitor::C_Command(mon, m, ret, rs, get_last_committed()));
+    return true;
+
   } else if (prefix == "osd pool set") {
     err = prepare_command_pool_set(cmdmap, ss);
     if (err < 0)
@@ -4320,7 +4357,7 @@ int OSDMonitor::_prepare_remove_pool(uint64_t pool)
   return 0;
 }
 
-int OSDMonitor::_prepare_rename_pool(uint64_t pool, string newname)
+int OSDMonitor::_prepare_rename_pool(int64_t pool, string newname)
 {
   dout(10) << "_prepare_rename_pool " << pool << dendl;
   if (pending_inc.old_pools.count(pool)) {
@@ -4330,7 +4367,7 @@ int OSDMonitor::_prepare_rename_pool(uint64_t pool, string newname)
   for (map<int64_t,string>::iterator p = pending_inc.new_pool_names.begin();
        p != pending_inc.new_pool_names.end();
        ++p) {
-    if (p->second == newname) {
+    if (p->second == newname && p->first != pool) {
       return -EEXIST;
     }
   }

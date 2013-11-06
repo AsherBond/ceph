@@ -118,6 +118,13 @@ public:
   bool is_max() const {
     return max;
   }
+  bool is_min() const {
+    // this needs to match how it's constructed
+    return snap == 0 &&
+	   hash == 0 &&
+	   !max &&
+	   pool == -1;
+  }
 
   static uint32_t _reverse_nibbles(uint32_t retval) {
     // reverse nibbles
@@ -177,7 +184,7 @@ public:
   friend bool operator>=(const hobject_t&, const hobject_t&);
   friend bool operator==(const hobject_t&, const hobject_t&);
   friend bool operator!=(const hobject_t&, const hobject_t&);
-  friend class ghobject_t;
+  friend struct ghobject_t;
 };
 WRITE_CLASS_ENCODER(hobject_t)
 

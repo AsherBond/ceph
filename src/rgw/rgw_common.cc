@@ -128,6 +128,7 @@ req_state::req_state(CephContext *_cct, class RGWEnv *e) : cct(_cct), cio(NULL),
 {
   enable_ops_log = e->conf->enable_ops_log;
   enable_usage_log = e->conf->enable_usage_log;
+  defer_to_bucket_acls = e->conf->defer_to_bucket_acls;
   content_started = false;
   format = 0;
   formatter = NULL;
@@ -135,7 +136,6 @@ req_state::req_state(CephContext *_cct, class RGWEnv *e) : cct(_cct), cio(NULL),
   object_acl = NULL;
   expect_cont = false;
 
-  bucket_name = NULL;
   object = NULL;
 
   header_ended = false;
@@ -149,7 +149,6 @@ req_state::req_state(CephContext *_cct, class RGWEnv *e) : cct(_cct), cio(NULL),
   perm_mask = 0;
   content_length = 0;
   object = NULL;
-  bucket_name = NULL;
   has_bad_meta = false;
   length = NULL;
   copy_source = NULL;
@@ -164,7 +163,6 @@ req_state::~req_state() {
   delete bucket_acl;
   delete object_acl;
   free((void *)object);
-  free((void *)bucket_name);
 }
 
 struct str_len {
@@ -618,8 +616,18 @@ bool verify_bucket_permission(struct req_state *s, int perm)
   return s->bucket_acl->verify_permission(s->user.user_id, perm, perm);
 }
 
+static inline bool check_deferred_bucket_acl(struct req_state *s, uint8_t deferred_check, int perm)
+{
+  return (s->defer_to_bucket_acls == deferred_check && verify_bucket_permission(s, perm));
+}
+
 bool verify_object_permission(struct req_state *s, RGWAccessControlPolicy *bucket_acl, RGWAccessControlPolicy *object_acl, int perm)
 {
+  if (check_deferred_bucket_acl(s, RGW_DEFER_TO_BUCKET_ACLS_RECURSE, perm) ||
+      check_deferred_bucket_acl(s, RGW_DEFER_TO_BUCKET_ACLS_FULL_CONTROL, RGW_PERM_FULL_CONTROL)) {
+    return true;
+  }
+
   if (!object_acl)
     return false;
 
@@ -651,13 +659,12 @@ bool verify_object_permission(struct req_state *s, int perm)
   return verify_object_permission(s, s->bucket_acl, s->object_acl, perm);
 }
 
-static char hex_to_num(char c)
+class HexTable
 {
-  static char table[256];
-  static bool initialized = false;
+  char table[256];
 
-
-  if (!initialized) {
+public:
+  HexTable() {
     memset(table, -1, sizeof(table));
     int i;
     for (i = '0'; i<='9'; i++)
@@ -667,7 +674,16 @@ static char hex_to_num(char c)
     for (i = 'a'; i<='f'; i++)
       table[i] = i - 'a' + 0xa;
   }
-  return table[(int)c];
+
+  char to_num(char c) {
+    return table[(int)c];
+  }
+};
+
+static char hex_to_num(char c)
+{
+  static HexTable hex_table;
+  return hex_table.to_num(c);
 }
 
 bool url_decode(string& src_str, string& dest_str)
@@ -706,6 +722,58 @@ bool url_decode(string& src_str, string& dest_str)
   dest_str = dest;
 
   return true;
+}
+
+static void escape_char(char c, string& dst)
+{
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%%%.2X", (unsigned int)c);
+  dst.append(buf);
+}
+
+static bool char_needs_url_encoding(char c)
+{
+  if (c <= 0x20 || c >= 0x7f)
+    return true;
+
+  switch (c) {
+    case 0x22:
+    case 0x23:
+    case 0x25:
+    case 0x26:
+    case 0x2B:
+    case 0x2C:
+    case 0x2F:
+    case 0x3A:
+    case 0x3B:
+    case 0x3C:
+    case 0x3E:
+    case 0x3D:
+    case 0x3F:
+    case 0x40:
+    case 0x5B:
+    case 0x5D:
+    case 0x5C:
+    case 0x5E:
+    case 0x60:
+    case 0x7B:
+    case 0x7D:
+      return true;
+  }
+  return false;
+}
+
+void url_encode(const string& src, string& dst)
+{
+  const char *p = src.c_str();
+  for (unsigned i = 0; i < src.size(); i++, p++) {
+    if (char_needs_url_encoding(*p)) {
+      escape_char(*p, dst);
+      continue;
+    }
+
+    dst.append(p, 1);
+  }
 }
 
 string rgw_trim_whitespace(const string& src)

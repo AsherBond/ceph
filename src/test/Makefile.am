@@ -234,7 +234,8 @@ bin_DEBUGPROGRAMS += ceph_bench_log
 
 check_SCRIPTS += \
 	unittest_bufferlist.sh \
-	test/encoding/check-generated.sh
+	test/encoding/check-generated.sh \
+	test/vstart_wrapped_tests.sh
 
 # target to build but not run the unit tests
 unittests:: $(check_PROGRAMS)
@@ -410,6 +411,11 @@ unittest_pglog_SOURCES = test/osd/TestPGLog.cc
 unittest_pglog_CXXFLAGS = $(UNITTEST_CXXFLAGS)
 unittest_pglog_LDADD = $(LIBOSD) $(UNITTEST_LDADD) $(CEPH_GLOBAL)
 check_PROGRAMS += unittest_pglog
+
+unittest_hitset_SOURCES = test/osd/hitset.cc
+unittest_hitset_CXXFLAGS = $(UNITTEST_CXXFLAGS)
+unittest_hitset_LDADD = $(LIBOSD) $(UNITTEST_LDADD) $(CEPH_GLOBAL)
+check_PROGRAMS += unittest_hitset
 
 if LINUX
 unittest_pglog_LDADD += -ldl
@@ -776,6 +782,14 @@ ceph_test_rados_api_misc_SOURCES = \
 ceph_test_rados_api_misc_LDADD = $(LIBRADOS) $(UNITTEST_LDADD) $(CEPH_GLOBAL)
 ceph_test_rados_api_misc_CXXFLAGS = $(UNITTEST_CXXFLAGS)
 bin_DEBUGPROGRAMS += ceph_test_rados_api_misc
+
+ceph_test_rados_api_tier_SOURCES = \
+	test/librados/tier.cc \
+	test/librados/test.cc \
+	osd/HitSet.cc
+ceph_test_rados_api_tier_LDADD = $(LIBRADOS) $(UNITTEST_LDADD) $(CEPH_GLOBAL)
+ceph_test_rados_api_tier_CXXFLAGS = $(UNITTEST_CXXFLAGS)
+bin_DEBUGPROGRAMS += ceph_test_rados_api_tier
 
 ceph_test_rados_api_lock_SOURCES = \
 	test/librados/lock.cc \

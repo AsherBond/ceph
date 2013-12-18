@@ -291,6 +291,7 @@ OPTION(mds_beacon_grace, OPT_FLOAT, 15)
 OPTION(mds_enforce_unique_name, OPT_BOOL, true)
 OPTION(mds_blacklist_interval, OPT_FLOAT, 24.0*60.0)  // how long to blacklist failed nodes
 OPTION(mds_session_timeout, OPT_FLOAT, 60)    // cap bits and leases time out if client idle
+OPTION(mds_freeze_tree_timeout, OPT_FLOAT, 30)    // cap bits and leases time out if client idle
 OPTION(mds_session_autoclose, OPT_FLOAT, 300) // autoclose idle session
 OPTION(mds_reconnect_timeout, OPT_FLOAT, 45)  // seconds to wait for clients during mds restart
 	      //  make it (mds_session_timeout - mds_beacon_grace)
@@ -397,6 +398,8 @@ OPTION(osd_pool_default_pg_num, OPT_INT, 8) // number of PGs for new pools. Conf
 OPTION(osd_pool_default_pgp_num, OPT_INT, 8) // number of PGs for placement purposes. Should be equal to pg_num
 OPTION(osd_pool_default_flags, OPT_INT, 0)   // default flags for new pools
 OPTION(osd_pool_default_flag_hashpspool, OPT_BOOL, true)   // use new pg hashing to prevent pool/pg overlap
+OPTION(osd_hit_set_min_size, OPT_INT, 1000)  // min target size for a HitSet
+OPTION(osd_hit_set_namespace, OPT_STR, ".ceph-internal") // rados namespace for hit_set tracking
 OPTION(osd_map_dedup, OPT_BOOL, true)
 OPTION(osd_map_cache_size, OPT_INT, 500)
 OPTION(osd_map_message_max, OPT_INT, 100)  // max maps per MOSDMap message
@@ -525,6 +528,9 @@ OPTION(osd_max_object_size, OPT_U64, 100*1024L*1024L*1024L) // OSD's maximum obj
 OPTION(osd_max_attr_size, OPT_U64, 0)
 
 OPTION(osd_objectstore, OPT_STR, "filestore")  // ObjectStore backend type
+// Override maintaining compatibility with older OSDs
+// Set to true for testing.  Users should NOT set this.
+OPTION(osd_debug_override_acting_compat, OPT_BOOL, false)
 
 /// filestore wb throttle limits
 OPTION(filestore_wbthrottle_enable, OPT_BOOL, true)

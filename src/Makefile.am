@@ -173,6 +173,7 @@ EXTRA_DIST += \
 	$(srcdir)/upstart/radosgw.conf \
 	$(srcdir)/upstart/radosgw-all.conf \
 	$(srcdir)/upstart/radosgw-all-starter.conf \
+	$(srcdir)/upstart/rbdmap.conf \
 	ceph.in \
 	ceph-disk \
 	ceph-disk-prepare \
@@ -310,7 +311,8 @@ ceph: ceph.in ./ceph_ver.h Makefile
 # cleaning
 
 clean-local:
-	rm -f *.so *.gcno *.gcda
+	rm -f *.so 
+	find . -name '*.gcno' -o -name '*.gcda' -o -name '*.lcov' | xargs rm -f
 	rm -f ceph java/java/com/ceph/crush/Bucket.class
 
 

@@ -1,6 +1,8 @@
 #!/bin/bash -x
 
 set -e
+set -o functrace
+PS4=' ${FUNCNAME[0]}: $LINENO: '
 
 get_pg()
 {
@@ -26,7 +28,7 @@ expect_false()
 }
 
 TMPFILE=/tmp/test_invalid.$$
-trap "rm $TMPFILE" 0
+trap "rm -f $TMPFILE" 0
 
 function check_response()
 {
@@ -79,6 +81,7 @@ ceph osd pool delete cache2 cache2 --yes-i-really-really-mean-it
 ceph auth add client.xx mon allow osd "allow *"
 ceph auth export client.xx >client.xx.keyring
 ceph auth add client.xx -i client.xx.keyring
+rm -f client.xx.keyring
 ceph auth list | grep client.xx
 ceph auth get client.xx | grep caps | grep mon
 ceph auth get client.xx | grep caps | grep osd
@@ -236,6 +239,8 @@ for id in `ceph osd ls` ; do
 	ceph tell osd.$id version
 done
 
+ceph osd rm 0 2>&1 | grep 'EBUSY'
+
 id=`ceph osd create`
 ceph osd lost $id --yes-i-really-mean-it
 ceph osd rm $id
@@ -323,10 +328,11 @@ for s in pg_num pgp_num size min_size crash_replay_interval crush_ruleset; do
 	ceph osd pool get data $s
 done
 
-ceph osd pool get data size | grep 'size: 2'
-ceph osd pool set data size 3
-ceph osd pool get data size | grep 'size: 3'
-ceph osd pool set data size 2
+old_size=$(ceph osd pool get data size | sed -e 's/size: //')
+(( new_size = old_size + 1 ))
+ceph osd pool set data size $new_size
+ceph osd pool get data size | grep "size: $new_size"
+ceph osd pool set data size $old_size
 
 ceph osd pool set data hashpspool true
 ceph osd pool set data hashpspool false
@@ -334,6 +340,14 @@ ceph osd pool set data hashpspool 0
 ceph osd pool set data hashpspool 1
 expect_false ceph osd pool set data hashpspool asdf
 expect_false ceph osd pool set data hashpspool 2
+
+ceph osd pool set rbd hit_set_type explicit_hash
+ceph osd pool set rbd hit_set_type explicit_object
+ceph osd pool set rbd hit_set_type bloom
+expect_false ceph osd pool set rbd hit_set_type i_dont_exist
+ceph osd pool set rbd hit_set_period 123
+ceph osd pool set rbd hit_set_count 12
+ceph osd pool set rbd hit_set_fpp .01
 
 ceph osd pool get rbd crush_ruleset | grep 'crush_ruleset: 2'
 

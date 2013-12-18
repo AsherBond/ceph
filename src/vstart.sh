@@ -35,6 +35,7 @@ start_rgw=0
 ip=""
 nodaemon=0
 smallmds=0
+hitset=""
 overwrite_conf=1
 cephx=1 #turn cephx on by default
 memstore=0
@@ -62,6 +63,7 @@ usage=$usage"\t-m ip:port\t\tspecify monitor address\n"
 usage=$usage"\t-k keep old configuration files\n"
 usage=$usage"\t-x enable cephx (on by default)\n"
 usage=$usage"\t-X disable cephx\n"
+usage=$usage"\t--hitset <pool> <hit_set_type>: enable hitset tracking\n"
 usage=$usage"\t-o config\t\t add extra config parameters to mds section\n"
 
 usage_exit() {
@@ -145,6 +147,11 @@ case $1 in
 	    ;;
     --memstore )
 	    memstore=1
+	    ;;
+    --hitset )
+	    hitset="$hitset $2 $3"
+	    shift
+	    shift
 	    ;;
     -o )
 	    extra_conf="$extra_conf	$2
@@ -529,10 +536,21 @@ $DAEMONOPTS
 EOF
 		    mkdir -p $CEPH_OUT_DIR/htdocs
 		    mkdir -p $CEPH_OUT_DIR/fastcgi_sock
+		    APACHE2_MODULE_PATH="/usr/lib/apache2/modules"
+		    APACHE2_EXTRA_MODULES_NAME="mpm_prefork authz_core"
+		    for module in $APACHE2_EXTRA_MODULES_NAME
+		    do
+			    if [ -f "${APACHE2_MODULE_PATH}/mod_${module}.so" ]; then
+				    APACHE2_EXTRA_MODULES="${APACHE2_EXTRA_MODULES}LoadModule ${module}_module ${APACHE2_MODULE_PATH}/mod_${module}.so
+"
+			    fi 
+		    done
+		    echo $APACHE2_EXTRA_MODULES
 		    cat <<EOF > $CEPH_OUT_DIR/apache.conf
 LoadModule env_module /usr/lib/apache2/modules/mod_env.so
 LoadModule rewrite_module /usr/lib/apache2/modules/mod_rewrite.so
 LoadModule fastcgi_module /usr/lib/apache2/modules/mod_fastcgi.so
+$APACHE2_EXTRA_MODULES
 
 Listen $rgwport
 ServerName rgwtest.example.com
@@ -580,6 +598,20 @@ EOF
 	run 'apache2' $SUDO apache2 -f $CEPH_OUT_DIR/apache.conf
     done
 fi
+
+do_hitsets() {
+    while [ -n "$*" ]; do
+	pool="$1"
+	type="$2"
+	shift
+	shift
+	echo "setting hit_set on pool $pool type $type ..."
+	$CEPH_ADM osd pool set $pool hit_set_type $type
+	$CEPH_ADM osd pool set $pool hit_set_count 8
+	$CEPH_ADM osd pool set $pool hit_set_period 30
+    done
+}
+do_hitsets $hitset
 
 echo "started.  stop.sh to stop.  see out/* (e.g. 'tail -f out/????') for debug output."
 

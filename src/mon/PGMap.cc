@@ -47,7 +47,7 @@ void PGMap::Incremental::encode(bufferlist &bl, uint64_t features) const
 
 void PGMap::Incremental::decode(bufferlist::iterator &bl)
 {
-  DECODE_START_LEGACY_COMPAT_LEN(6, 5, 5, bl);
+  DECODE_START_LEGACY_COMPAT_LEN(7, 5, 5, bl);
   ::decode(version, bl);
   if (struct_v < 3) {
     pg_stat_updates.clear();
@@ -180,7 +180,7 @@ void PGMap::apply_incremental(CephContext *cct, const Incremental& inc)
   stamp = inc.stamp;
 
   pool_stat_t pg_sum_old = pg_sum;
-  hash_map<uint64_t, pool_stat_t> pg_pool_sum_old;
+  ceph::unordered_map<uint64_t, pool_stat_t> pg_pool_sum_old;
 
   bool ratios_changed = false;
   if (inc.full_ratio != full_ratio && inc.full_ratio != -1) {
@@ -203,11 +203,24 @@ void PGMap::apply_incremental(CephContext *cct, const Incremental& inc)
     if (pg_pool_sum_old.count(update_pg.pool()) == 0)
       pg_pool_sum_old[update_pg.pool()] = pg_pool_sum[update_pg.pool()];
 
-    hash_map<pg_t,pg_stat_t>::iterator t = pg_stat.find(update_pg);
+    ceph::unordered_map<pg_t,pg_stat_t>::iterator t = pg_stat.find(update_pg);
     if (t == pg_stat.end()) {
-      hash_map<pg_t,pg_stat_t>::value_type v(update_pg, update_stat);
+      ceph::unordered_map<pg_t,pg_stat_t>::value_type v(update_pg, update_stat);
       pg_stat.insert(v);
+      // did we affect the min?
+      if (min_last_epoch_clean &&
+	  update_stat.get_effective_last_epoch_clean() < min_last_epoch_clean)
+	min_last_epoch_clean = 0;
     } else {
+      // did we (or might we) affect the min?
+      epoch_t lec = update_stat.get_effective_last_epoch_clean();
+      if (min_last_epoch_clean &&
+	  (lec < min_last_epoch_clean ||  // we did
+	   (lec > min_last_epoch_clean && // we might
+	    t->second.get_effective_last_epoch_clean() == min_last_epoch_clean)
+	   ))
+	min_last_epoch_clean = 0;
+
       stat_pg_sub(update_pg, t->second);
       t->second = update_stat;
     }
@@ -221,37 +234,60 @@ void PGMap::apply_incremental(CephContext *cct, const Incremental& inc)
     int osd = p->first;
     const osd_stat_t &new_stats(p->second);
 
-    hash_map<int32_t,osd_stat_t>::iterator t = osd_stat.find(osd);
+    ceph::unordered_map<int32_t,osd_stat_t>::iterator t = osd_stat.find(osd);
     if (t == osd_stat.end()) {
-      hash_map<int32_t,osd_stat_t>::value_type v(osd, new_stats);
+      ceph::unordered_map<int32_t,osd_stat_t>::value_type v(osd, new_stats);
       osd_stat.insert(v);
     } else {
       stat_osd_sub(t->second);
       t->second = new_stats;
     }
-    assert(inc.get_osd_epochs().find(osd) != inc.get_osd_epochs().end());
-    osd_epochs.insert(*(inc.get_osd_epochs().find(osd)));
+    ceph::unordered_map<int32_t,epoch_t>::iterator i = osd_epochs.find(osd);
+    map<int32_t,epoch_t>::const_iterator j = inc.get_osd_epochs().find(osd);
+    assert(j != inc.get_osd_epochs().end());
+
+    // will we potentially affect the min?
+    if (min_last_epoch_clean &&
+	(i == osd_epochs.end() ||
+	 j->second < min_last_epoch_clean ||
+	 (j->second > min_last_epoch_clean &&
+	  i->second == min_last_epoch_clean)))
+      min_last_epoch_clean = 0;
+
+    if (i == osd_epochs.end())
+      osd_epochs.insert(*j);
+    else
+      i->second = j->second;
 
     stat_osd_add(new_stats);
 
     // adjust [near]full status
     register_nearfull_status(osd, new_stats);
   }
+  set<int64_t> deleted_pools;
   for (set<pg_t>::const_iterator p = inc.pg_remove.begin();
        p != inc.pg_remove.end();
        ++p) {
     const pg_t &removed_pg(*p);
-    hash_map<pg_t,pg_stat_t>::iterator s = pg_stat.find(removed_pg);
+    ceph::unordered_map<pg_t,pg_stat_t>::iterator s = pg_stat.find(removed_pg);
     if (s != pg_stat.end()) {
       stat_pg_sub(removed_pg, s->second);
       pg_stat.erase(s);
     }
+    if (removed_pg.ps() == 0)
+      deleted_pools.insert(removed_pg.pool());
+  }
+  for (set<int64_t>::iterator p = deleted_pools.begin();
+       p != deleted_pools.end();
+       ++p) {
+    dout(20) << " deleted pool " << *p << dendl;
+    deleted_pool(*p);
   }
 
   for (set<int>::iterator p = inc.get_osd_stat_rm().begin();
        p != inc.get_osd_stat_rm().end();
        ++p) {
-    hash_map<int32_t,osd_stat_t>::iterator t = osd_stat.find(*p);
+    ceph::unordered_map<int32_t,osd_stat_t>::iterator t = osd_stat.find(*p);
     if (t != osd_stat.end()) {
       stat_osd_sub(t->second);
       osd_stat.erase(t);
@@ -281,13 +317,15 @@ void PGMap::apply_incremental(CephContext *cct, const Incremental& inc)
     last_osdmap_epoch = inc.osdmap_epoch;
   if (inc.pg_scan)
     last_pg_scan = inc.pg_scan;
+
+  min_last_epoch_clean = 0;  // invalidate
 }
 
 void PGMap::redo_full_sets()
 {
   full_osds.clear();
   nearfull_osds.clear();
-  for (hash_map<int32_t, osd_stat_t>::iterator i = osd_stat.begin();
+  for (ceph::unordered_map<int32_t, osd_stat_t>::iterator i = osd_stat.begin();
        i != osd_stat.end();
        ++i) {
     register_nearfull_status(i->first, i->second);
@@ -322,23 +360,25 @@ void PGMap::calc_stats()
   pg_sum = pool_stat_t();
   osd_sum = osd_stat_t();
 
-  for (hash_map<pg_t,pg_stat_t>::iterator p = pg_stat.begin();
+  for (ceph::unordered_map<pg_t,pg_stat_t>::iterator p = pg_stat.begin();
        p != pg_stat.end();
        ++p) {
     stat_pg_add(p->first, p->second);
   }
-  for (hash_map<int32_t,osd_stat_t>::iterator p = osd_stat.begin();
+  for (ceph::unordered_map<int32_t,osd_stat_t>::iterator p = osd_stat.begin();
        p != osd_stat.end();
        ++p)
     stat_osd_add(p->second);
 
   redo_full_sets();
+
+  calc_min_last_epoch_clean();
 }
 
 void PGMap::update_pg(pg_t pgid, bufferlist& bl)
 {
   bufferlist::iterator p = bl.begin();
-  hash_map<pg_t,pg_stat_t>::iterator s = pg_stat.find(pgid);
+  ceph::unordered_map<pg_t,pg_stat_t>::iterator s = pg_stat.find(pgid);
   if (s != pg_stat.end())
     stat_pg_sub(pgid, s->second);
   pg_stat_t& r = pg_stat[pgid];
@@ -348,7 +388,7 @@ void PGMap::update_pg(pg_t pgid, bufferlist& bl)
 
 void PGMap::remove_pg(pg_t pgid)
 {
-  hash_map<pg_t,pg_stat_t>::iterator s = pg_stat.find(pgid);
+  ceph::unordered_map<pg_t,pg_stat_t>::iterator s = pg_stat.find(pgid);
   if (s != pg_stat.end()) {
     stat_pg_sub(pgid, s->second);
     pg_stat.erase(s);
@@ -358,7 +398,7 @@ void PGMap::remove_pg(pg_t pgid)
 void PGMap::update_osd(int osd, bufferlist& bl)
 {
   bufferlist::iterator p = bl.begin();
-  hash_map<int32_t,osd_stat_t>::iterator o = osd_stat.find(osd);
+  ceph::unordered_map<int32_t,osd_stat_t>::iterator o = osd_stat.find(osd);
   if (o != osd_stat.end())
     stat_osd_sub(o->second);
   osd_stat_t& r = osd_stat[osd];
@@ -371,7 +411,7 @@ void PGMap::update_osd(int osd, bufferlist& bl)
 
 void PGMap::remove_osd(int osd)
 {
-  hash_map<int32_t,osd_stat_t>::iterator o = osd_stat.find(osd);
+  ceph::unordered_map<int32_t,osd_stat_t>::iterator o = osd_stat.find(osd);
   if (o != osd_stat.end()) {
     stat_osd_sub(o->second);
     osd_stat.erase(o);
@@ -390,8 +430,13 @@ void PGMap::stat_pg_add(const pg_t &pgid, const pg_stat_t &s)
   pg_sum.add(s);
   if (s.state & PG_STATE_CREATING) {
     creating_pgs.insert(pgid);
-    if (s.acting.size())
-      creating_pgs_by_osd[s.acting[0]].insert(pgid);
+    if (s.acting_primary >= 0)
+      creating_pgs_by_osd[s.acting_primary].insert(pgid);
+  }
+  for (vector<int>::const_iterator p = s.blocked_by.begin();
+       p != s.blocked_by.end();
+       ++p) {
+    ++blocked_by_sum[*p];
   }
 }
 
@@ -409,11 +454,21 @@ void PGMap::stat_pg_sub(const pg_t &pgid, const pg_stat_t &s)
   pg_sum.sub(s);
   if (s.state & PG_STATE_CREATING) {
     creating_pgs.erase(pgid);
-    if (s.acting.size()) {
-      creating_pgs_by_osd[s.acting[0]].erase(pgid);
-      if (creating_pgs_by_osd[s.acting[0]].size() == 0)
-        creating_pgs_by_osd.erase(s.acting[0]);
+    if (s.acting_primary >= 0) {
+      creating_pgs_by_osd[s.acting_primary].erase(pgid);
+      if (creating_pgs_by_osd[s.acting_primary].size() == 0)
+        creating_pgs_by_osd.erase(s.acting_primary);
     }
+  }
+
+  for (vector<int>::const_iterator p = s.blocked_by.begin();
+       p != s.blocked_by.end();
+       ++p) {
+    ceph::unordered_map<int,int>::iterator q = blocked_by_sum.find(*p);
+    assert(q != blocked_by_sum.end());
+    --q->second;
+    if (q->second == 0)
+      blocked_by_sum.erase(q);
   }
 }
 
@@ -433,7 +488,7 @@ epoch_t PGMap::calc_min_last_epoch_clean() const
 {
   if (pg_stat.empty())
     return 0;
-  hash_map<pg_t,pg_stat_t>::const_iterator p = pg_stat.begin();
+  ceph::unordered_map<pg_t,pg_stat_t>::const_iterator p = pg_stat.begin();
   epoch_t min = p->second.get_effective_last_epoch_clean();
   for (++p; p != pg_stat.end(); ++p) {
     epoch_t lec = p->second.get_effective_last_epoch_clean();
@@ -442,7 +497,7 @@ epoch_t PGMap::calc_min_last_epoch_clean() const
   }
   // also scan osd epochs
   // don't trim past the oldest reported osd epoch
-  for (hash_map<int32_t, epoch_t>::const_iterator i = osd_epochs.begin();
+  for (ceph::unordered_map<int32_t, epoch_t>::const_iterator i = osd_epochs.begin();
        i != osd_epochs.end();
        ++i) {
     if (i->second < min)
@@ -481,7 +536,7 @@ void PGMap::encode(bufferlist &bl, uint64_t features) const
 
 void PGMap::decode(bufferlist::iterator &bl)
 {
-  DECODE_START_LEGACY_COMPAT_LEN(5, 4, 4, bl);
+  DECODE_START_LEGACY_COMPAT_LEN(6, 4, 4, bl);
   ::decode(version, bl);
   if (struct_v < 3) {
     pg_stat.clear();
@@ -508,7 +563,7 @@ void PGMap::decode(bufferlist::iterator &bl)
   if (struct_v >= 6) {
     ::decode(osd_epochs, bl);
   } else {
-    for (hash_map<int32_t, osd_stat_t>::iterator i = osd_stat.begin();
+    for (ceph::unordered_map<int32_t, osd_stat_t>::iterator i = osd_stat.begin();
 	 i != osd_stat.end();
 	 ++i) {
       // This isn't accurate, but will cause trimming to behave like
@@ -528,10 +583,10 @@ void PGMap::dirty_all(Incremental& inc)
   inc.full_ratio = full_ratio;
   inc.nearfull_ratio = nearfull_ratio;
 
-  for (hash_map<pg_t,pg_stat_t>::const_iterator p = pg_stat.begin(); p != pg_stat.end(); ++p) {
+  for (ceph::unordered_map<pg_t,pg_stat_t>::const_iterator p = pg_stat.begin(); p != pg_stat.end(); ++p) {
     inc.pg_stat_updates[p->first] = p->second;
   }
-  for (hash_map<int32_t, osd_stat_t>::const_iterator p = osd_stat.begin(); p != osd_stat.end(); ++p) {
+  for (ceph::unordered_map<int32_t, osd_stat_t>::const_iterator p = osd_stat.begin(); p != osd_stat.end(); ++p) {
     assert(osd_epochs.count(p->first));
     inc.update_stat(p->first,
 		   inc.get_osd_epochs().find(p->first)->second,
@@ -577,7 +632,7 @@ void PGMap::dump_delta(Formatter *f) const
 void PGMap::dump_pg_stats(Formatter *f, bool brief) const
 {
   f->open_array_section("pg_stats");
-  for (hash_map<pg_t,pg_stat_t>::const_iterator i = pg_stat.begin();
+  for (ceph::unordered_map<pg_t,pg_stat_t>::const_iterator i = pg_stat.begin();
        i != pg_stat.end();
        ++i) {
     f->open_object_section("pg_stat");
@@ -594,7 +649,7 @@ void PGMap::dump_pg_stats(Formatter *f, bool brief) const
 void PGMap::dump_pool_stats(Formatter *f) const
 {
   f->open_array_section("pool_stats");
-  for (hash_map<int,pool_stat_t>::const_iterator p = pg_pool_sum.begin();
+  for (ceph::unordered_map<int,pool_stat_t>::const_iterator p = pg_pool_sum.begin();
        p != pg_pool_sum.end();
        ++p) {
     f->open_object_section("pool_stat");
@@ -608,7 +663,7 @@ void PGMap::dump_pool_stats(Formatter *f) const
 void PGMap::dump_osd_stats(Formatter *f) const
 {
   f->open_array_section("osd_stats");
-  for (hash_map<int32_t,osd_stat_t>::const_iterator q = osd_stat.begin();
+  for (ceph::unordered_map<int32_t,osd_stat_t>::const_iterator q = osd_stat.begin();
        q != osd_stat.end();
        ++q) {
     f->open_object_section("osd_stat");
@@ -620,10 +675,10 @@ void PGMap::dump_osd_stats(Formatter *f) const
 }
 
 void PGMap::dump_pg_stats_plain(ostream& ss,
-				const hash_map<pg_t, pg_stat_t>& pg_stats) const
+				const ceph::unordered_map<pg_t, pg_stat_t>& pg_stats) const
 {
-  ss << "pg_stat\tobjects\tmip\tdegr\tunf\tbytes\tlog\tdisklog\tstate\tstate_stamp\tv\treported\tup\tacting\tlast_scrub\tscrub_stamp\tlast_deep_scrub\tdeep_scrub_stamp" << std::endl;
-  for (hash_map<pg_t, pg_stat_t>::const_iterator i = pg_stats.begin();
+  ss << "pg_stat\tobjects\tmip\tdegr\tmisp\tunf\tbytes\tlog\tdisklog\tstate\tstate_stamp\tv\treported\tup\tup_primary\tacting\tacting_primary\tlast_scrub\tscrub_stamp\tlast_deep_scrub\tdeep_scrub_stamp" << std::endl;
+  for (ceph::unordered_map<pg_t, pg_stat_t>::const_iterator i = pg_stats.begin();
        i != pg_stats.end(); ++i) {
     const pg_stat_t &st(i->second);
     ss << i->first
@@ -631,6 +686,7 @@ void PGMap::dump_pg_stats_plain(ostream& ss,
       //<< "\t" << st.num_object_copies
        << "\t" << st.stats.sum.num_objects_missing_on_primary
        << "\t" << st.stats.sum.num_objects_degraded
+       << "\t" << st.stats.sum.num_objects_misplaced
        << "\t" << st.stats.sum.num_objects_unfound
        << "\t" << st.stats.sum.num_bytes
        << "\t" << st.log_size
@@ -640,7 +696,9 @@ void PGMap::dump_pg_stats_plain(ostream& ss,
        << "\t" << st.version
        << "\t" << st.reported_epoch << ":" << st.reported_seq
        << "\t" << st.up
+       << "\t" << st.up_primary
        << "\t" << st.acting
+       << "\t" << st.acting_primary
        << "\t" << st.last_scrub << "\t" << st.last_scrub_stamp
        << "\t" << st.last_deep_scrub << "\t" << st.last_deep_scrub_stamp
        << std::endl;
@@ -656,7 +714,7 @@ void PGMap::dump(ostream& ss) const
   ss << "full_ratio " << full_ratio << std::endl;
   ss << "nearfull_ratio " << nearfull_ratio << std::endl;
   dump_pg_stats_plain(ss, pg_stat);
-  for (hash_map<int,pool_stat_t>::const_iterator p = pg_pool_sum.begin();
+  for (ceph::unordered_map<int,pool_stat_t>::const_iterator p = pg_pool_sum.begin();
        p != pg_pool_sum.end();
        ++p)
     ss << "pool " << p->first
@@ -679,7 +737,7 @@ void PGMap::dump(ostream& ss) const
      << "\t" << pg_sum.ondisk_log_size
      << std::endl;
   ss << "osdstat\tkbused\tkbavail\tkb\thb in\thb out" << std::endl;
-  for (hash_map<int32_t,osd_stat_t>::const_iterator p = osd_stat.begin();
+  for (ceph::unordered_map<int32_t,osd_stat_t>::const_iterator p = osd_stat.begin();
        p != osd_stat.end();
        ++p)
     ss << p->first
@@ -696,9 +754,9 @@ void PGMap::dump(ostream& ss) const
 }
 
 void PGMap::get_stuck_stats(PGMap::StuckPG type, utime_t cutoff,
-			    hash_map<pg_t, pg_stat_t>& stuck_pgs) const
+			    ceph::unordered_map<pg_t, pg_stat_t>& stuck_pgs) const
 {
-  for (hash_map<pg_t, pg_stat_t>::const_iterator i = pg_stat.begin();
+  for (ceph::unordered_map<pg_t, pg_stat_t>::const_iterator i = pg_stat.begin();
        i != pg_stat.end();
        ++i) {
     utime_t val;
@@ -712,6 +770,16 @@ void PGMap::get_stuck_stats(PGMap::StuckPG type, utime_t cutoff,
       if (i->second.state & PG_STATE_CLEAN)
 	continue;
       val = i->second.last_clean;
+      break;
+    case STUCK_DEGRADED:
+      if ((i->second.state & PG_STATE_DEGRADED) == 0)
+	continue;
+      val = i->second.last_undegraded;
+      break;
+    case STUCK_UNDERSIZED:
+      if ((i->second.state & PG_STATE_UNDERSIZED) == 0)
+	continue;
+      val = i->second.last_fullsized;
       break;
     case STUCK_STALE:
       if ((i->second.state & PG_STATE_STALE) == 0)
@@ -730,10 +798,10 @@ void PGMap::get_stuck_stats(PGMap::StuckPG type, utime_t cutoff,
 
 void PGMap::dump_stuck(Formatter *f, PGMap::StuckPG type, utime_t cutoff) const
 {
-  hash_map<pg_t, pg_stat_t> stuck_pg_stats;
+  ceph::unordered_map<pg_t, pg_stat_t> stuck_pg_stats;
   get_stuck_stats(type, cutoff, stuck_pg_stats);
   f->open_array_section("stuck_pg_stats");
-  for (hash_map<pg_t,pg_stat_t>::const_iterator i = stuck_pg_stats.begin();
+  for (ceph::unordered_map<pg_t,pg_stat_t>::const_iterator i = stuck_pg_stats.begin();
        i != stuck_pg_stats.end();
        ++i) {
     f->open_object_section("pg_stat");
@@ -746,7 +814,7 @@ void PGMap::dump_stuck(Formatter *f, PGMap::StuckPG type, utime_t cutoff) const
 
 void PGMap::dump_stuck_plain(ostream& ss, PGMap::StuckPG type, utime_t cutoff) const
 {
-  hash_map<pg_t, pg_stat_t> stuck_pg_stats;
+  ceph::unordered_map<pg_t, pg_stat_t> stuck_pg_stats;
   get_stuck_stats(type, cutoff, stuck_pg_stats);
   if (!stuck_pg_stats.empty())
     dump_pg_stats_plain(ss, stuck_pg_stats);
@@ -755,7 +823,7 @@ void PGMap::dump_stuck_plain(ostream& ss, PGMap::StuckPG type, utime_t cutoff) c
 void PGMap::dump_osd_perf_stats(Formatter *f) const
 {
   f->open_array_section("osd_perf_infos");
-  for (hash_map<int32_t, osd_stat_t>::const_iterator i = osd_stat.begin();
+  for (ceph::unordered_map<int32_t, osd_stat_t>::const_iterator i = osd_stat.begin();
        i != osd_stat.end();
        ++i) {
     f->open_object_section("osd");
@@ -772,15 +840,43 @@ void PGMap::dump_osd_perf_stats(Formatter *f) const
 void PGMap::print_osd_perf_stats(std::ostream *ss) const
 {
   TextTable tab;
-  tab.define_column("osdid", TextTable::LEFT, TextTable::RIGHT);
+  tab.define_column("osd", TextTable::LEFT, TextTable::RIGHT);
   tab.define_column("fs_commit_latency(ms)", TextTable::LEFT, TextTable::RIGHT);
   tab.define_column("fs_apply_latency(ms)", TextTable::LEFT, TextTable::RIGHT);
-  for (hash_map<int32_t, osd_stat_t>::const_iterator i = osd_stat.begin();
+  for (ceph::unordered_map<int32_t, osd_stat_t>::const_iterator i = osd_stat.begin();
        i != osd_stat.end();
        ++i) {
     tab << i->first;
     tab << i->second.fs_perf_stat.filestore_commit_latency;
     tab << i->second.fs_perf_stat.filestore_apply_latency;
+    tab << TextTable::endrow;
+  }
+  (*ss) << tab;
+}
+
+void PGMap::dump_osd_blocked_by_stats(Formatter *f) const
+{
+  f->open_array_section("osd_blocked_by_infos");
+  for (ceph::unordered_map<int,int>::const_iterator i = blocked_by_sum.begin();
+       i != blocked_by_sum.end();
+       ++i) {
+    f->open_object_section("osd");
+    f->dump_int("id", i->first);
+    f->dump_int("num_blocked", i->second);
+    f->close_section();
+  }
+  f->close_section();
+}
+void PGMap::print_osd_blocked_by_stats(std::ostream *ss) const
+{
+  TextTable tab;
+  tab.define_column("osd", TextTable::LEFT, TextTable::RIGHT);
+  tab.define_column("num_blocked", TextTable::LEFT, TextTable::RIGHT);
+  for (ceph::unordered_map<int,int>::const_iterator i = blocked_by_sum.begin();
+       i != blocked_by_sum.end();
+       ++i) {
+    tab << i->first;
+    tab << i->second;
     tab << TextTable::endrow;
   }
   (*ss) << tab;
@@ -805,6 +901,23 @@ void PGMap::recovery_summary(Formatter *f, ostream *out,
     }
     first = false;
   }
+  if (delta_sum.stats.sum.num_objects_misplaced) {
+    double pc = (double)delta_sum.stats.sum.num_objects_misplaced /
+      (double)delta_sum.stats.sum.num_object_copies * (double)100.0;
+    char b[20];
+    snprintf(b, sizeof(b), "%.3lf", pc);
+    if (f) {
+      f->dump_unsigned("misplaced_objects", delta_sum.stats.sum.num_objects_misplaced);
+      f->dump_unsigned("misplaced_total", delta_sum.stats.sum.num_object_copies);
+      f->dump_string("misplaced_ratio", b);
+    } else {
+      if (!first)
+	*out << "; ";
+      *out << delta_sum.stats.sum.num_objects_misplaced
+	   << "/" << delta_sum.stats.sum.num_object_copies << " objects misplaced (" << b << "%)";
+    }
+    first = false;
+  }
   if (delta_sum.stats.sum.num_objects_unfound) {
     double pc = (double)delta_sum.stats.sum.num_objects_unfound /
       (double)delta_sum.stats.sum.num_objects * (double)100.0;
@@ -820,7 +933,6 @@ void PGMap::recovery_summary(Formatter *f, ostream *out,
       *out << delta_sum.stats.sum.num_objects_unfound
 	   << "/" << delta_sum.stats.sum.num_objects << " unfound (" << b << "%)";
     }
-    first = false;
   }
 }
 
@@ -865,11 +977,11 @@ void PGMap::overall_recovery_summary(Formatter *f, ostream *out) const
 void PGMap::pool_recovery_rate_summary(Formatter *f, ostream *out,
                                        uint64_t poolid) const
 {
-  hash_map<uint64_t,pair<pool_stat_t,utime_t> >::const_iterator p =
+  ceph::unordered_map<uint64_t,pair<pool_stat_t,utime_t> >::const_iterator p =
     per_pool_sum_delta.find(poolid);
   if (p == per_pool_sum_delta.end())
     return;
-  hash_map<uint64_t,utime_t>::const_iterator ts =
+  ceph::unordered_map<uint64_t,utime_t>::const_iterator ts =
     per_pool_sum_deltas_stamps.find(p->first);
   assert(ts != per_pool_sum_deltas_stamps.end());
   recovery_rate_summary(f, out, p->second.first, ts->second);
@@ -878,7 +990,7 @@ void PGMap::pool_recovery_rate_summary(Formatter *f, ostream *out,
 void PGMap::pool_recovery_summary(Formatter *f, ostream *out,
                                   uint64_t poolid) const
 {
-  hash_map<uint64_t,pair<pool_stat_t,utime_t> >::const_iterator p =
+  ceph::unordered_map<uint64_t,pair<pool_stat_t,utime_t> >::const_iterator p =
     per_pool_sum_delta.find(poolid);
   if (p == per_pool_sum_delta.end())
     return;
@@ -926,11 +1038,11 @@ void PGMap::overall_client_io_rate_summary(Formatter *f, ostream *out) const
 void PGMap::pool_client_io_rate_summary(Formatter *f, ostream *out,
                                         uint64_t poolid) const
 {
-  hash_map<uint64_t,pair<pool_stat_t,utime_t> >::const_iterator p =
+  ceph::unordered_map<uint64_t,pair<pool_stat_t,utime_t> >::const_iterator p =
     per_pool_sum_delta.find(poolid);
   if (p == per_pool_sum_delta.end())
     return;
-  hash_map<uint64_t,utime_t>::const_iterator ts =
+  ceph::unordered_map<uint64_t,utime_t>::const_iterator ts =
     per_pool_sum_deltas_stamps.find(p->first);
   assert(ts != per_pool_sum_deltas_stamps.end());
   client_io_rate_summary(f, out, p->second.first, ts->second);
@@ -1035,9 +1147,9 @@ void PGMap::update_one_pool_delta(CephContext *cct,
  * @param pg_pool_sum_old   Map of pool stats for delta calcs.
  */
 void PGMap::update_pool_deltas(CephContext *cct, const utime_t ts,
-                               const hash_map<uint64_t,pool_stat_t>& pg_pool_sum_old)
+                               const ceph::unordered_map<uint64_t,pool_stat_t>& pg_pool_sum_old)
 {
-  for (hash_map<uint64_t,pool_stat_t>::const_iterator it = pg_pool_sum_old.begin();
+  for (ceph::unordered_map<uint64_t,pool_stat_t>::const_iterator it = pg_pool_sum_old.begin();
        it != pg_pool_sum_old.end(); ++it) {
     update_one_pool_delta(cct, ts, it->first, it->second);
   }
@@ -1056,7 +1168,7 @@ void PGMap::print_summary(Formatter *f, ostream *out) const
   if (f)
     f->open_array_section("pgs_by_state");
 
-  for (hash_map<int,int>::const_iterator p = num_pg_by_state.begin();
+  for (ceph::unordered_map<int,int>::const_iterator p = num_pg_by_state.begin();
        p != num_pg_by_state.end();
        ++p) {
     if (f) {
@@ -1119,7 +1231,7 @@ void PGMap::print_oneline_summary(ostream *out) const
 {
   std::stringstream ss;
 
-  for (hash_map<int,int>::const_iterator p = num_pg_by_state.begin();
+  for (ceph::unordered_map<int,int>::const_iterator p = num_pg_by_state.begin();
        p != num_pg_by_state.end();
        ++p) {
     if (p != num_pg_by_state.begin())

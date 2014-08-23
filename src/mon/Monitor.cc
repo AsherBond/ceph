@@ -156,6 +156,7 @@ Monitor::Monitor(CephContext* cct_, string nm, MonitorDBStore *s,
   state(STATE_PROBING),
   
   elector(this),
+  required_features(0),
   leader(0),
   quorum_features(0),
   scrub_version(0),
@@ -197,6 +198,15 @@ Monitor::Monitor(CephContext* cct_, string nm, MonitorDBStore *s,
   assert(r);
 
   exited_quorum = ceph_clock_now(g_ceph_context);
+
+  // assume our commands until we have an election.  this only means
+  // we won't reply with EINVAL before the election; any command that
+  // actually matters will wait until we have quorum etc and then
+  // retry (and revalidate).
+  const MonCommand *cmds;
+  int cmdsize;
+  get_locally_supported_monitor_commands(&cmds, &cmdsize);
+  set_leader_supported_commands(cmds, cmdsize);
 }
 
 PaxosService *Monitor::get_paxos_service_by_name(const string& name)
@@ -233,12 +243,6 @@ Monitor::~Monitor()
 }
 
 
-enum {
-  l_mon_first = 456000,
-  l_mon_last,
-};
-
-
 class AdminHook : public AdminSocketHook {
   Monitor *mon;
 public:
@@ -260,7 +264,7 @@ void Monitor::do_admin_command(string command, cmdmap_t& cmdmap, string format,
   boost::scoped_ptr<Formatter> f(new_formatter(format));
 
   if (command == "mon_status") {
-    _mon_status(f.get(), ss);
+    get_mon_status(f.get(), ss);
     if (f)
       f->flush(ss);
   } else if (command == "quorum_status")
@@ -277,6 +281,8 @@ void Monitor::do_admin_command(string command, cmdmap_t& cmdmap, string format,
     sync_force(f.get(), ss);
   } else if (command.find("add_bootstrap_peer_hint") == 0) {
     _add_bootstrap_peer_hint(command, cmdmap, ss);
+  } else if (command.find("osdmonitor_prepare_command") == 0) {
+    _osdmonitor_prepare_command(cmdmap, ss);
   } else if (command == "quorum enter") {
     elector.start_participating();
     start_election();
@@ -303,6 +309,8 @@ CompatSet Monitor::get_supported_features()
   CompatSet::FeatureSet ceph_mon_feature_incompat;
   ceph_mon_feature_incompat.insert(CEPH_MON_FEATURE_INCOMPAT_BASE);
   ceph_mon_feature_incompat.insert(CEPH_MON_FEATURE_INCOMPAT_SINGLE_PAXOS);
+  ceph_mon_feature_incompat.insert(CEPH_MON_FEATURE_INCOMPAT_OSD_ERASURE_CODES);
+  ceph_mon_feature_incompat.insert(CEPH_MON_FEATURE_INCOMPAT_OSDMAP_ENC);
   return CompatSet(ceph_mon_feature_compat, ceph_mon_feature_ro_compat,
 		   ceph_mon_feature_incompat);
 }
@@ -322,25 +330,7 @@ int Monitor::check_features(MonitorDBStore *store)
   CompatSet required = get_supported_features();
   CompatSet ondisk;
 
-  bufferlist features;
-  store->get(MONITOR_NAME, COMPAT_SET_LOC, features);
-  if (features.length() == 0) {
-    generic_dout(0) << "WARNING: mon fs missing feature list.\n"
-	    << "Assuming it is old-style and introducing one." << dendl;
-    //we only want the baseline ~v.18 features assumed to be on disk.
-    //If new features are introduced this code needs to disappear or
-    //be made smarter.
-    ondisk = get_legacy_features();
-
-    bufferlist bl;
-    ondisk.encode(bl);
-    MonitorDBStore::Transaction t;
-    t.put(MONITOR_NAME, COMPAT_SET_LOC, bl);
-    store->apply_transaction(t);
-  } else {
-    bufferlist::iterator it = features.begin();
-    ondisk.decode(it);
-  }
+  read_features_off_disk(store, &ondisk);
 
   if (!required.writeable(ondisk)) {
     CompatSet diff = required.unsupported(ondisk);
@@ -351,15 +341,36 @@ int Monitor::check_features(MonitorDBStore *store)
   return 0;
 }
 
+void Monitor::read_features_off_disk(MonitorDBStore *store, CompatSet *features)
+{
+  bufferlist featuresbl;
+  store->get(MONITOR_NAME, COMPAT_SET_LOC, featuresbl);
+  if (featuresbl.length() == 0) {
+    generic_dout(0) << "WARNING: mon fs missing feature list.\n"
+            << "Assuming it is old-style and introducing one." << dendl;
+    //we only want the baseline ~v.18 features assumed to be on disk.
+    //If new features are introduced this code needs to disappear or
+    //be made smarter.
+    *features = get_legacy_features();
+
+    bufferlist bl;
+    features->encode(bl);
+    MonitorDBStore::Transaction t;
+    t.put(MONITOR_NAME, COMPAT_SET_LOC, bl);
+    store->apply_transaction(t);
+  } else {
+    bufferlist::iterator it = featuresbl.begin();
+    features->decode(it);
+  }
+}
+
 void Monitor::read_features()
 {
-  bufferlist bl;
-  store->get(MONITOR_NAME, COMPAT_SET_LOC, bl);
-  assert(bl.length());
-
-  bufferlist::iterator p = bl.begin();
-  ::decode(features, p);
+  read_features_off_disk(store, &features);
   dout(10) << "features " << features << dendl;
+
+  apply_compatset_features_to_quorum_requirements();
+  dout(10) << "required_features " << required_features << dendl;
 }
 
 void Monitor::write_features(MonitorDBStore::Transaction &t)
@@ -369,16 +380,75 @@ void Monitor::write_features(MonitorDBStore::Transaction &t)
   t.put(MONITOR_NAME, COMPAT_SET_LOC, bl);
 }
 
+const char** Monitor::get_tracked_conf_keys() const
+{
+  static const char* KEYS[] = {
+    "mon_lease",
+    "mon_lease_renew_interval",
+    "mon_lease_ack_timeout",
+    NULL
+  };
+  return KEYS;
+}
+
+void Monitor::handle_conf_change(const struct md_config_t *conf,
+                                 const std::set<std::string> &changed)
+{
+  sanitize_options();
+}
+
+int Monitor::sanitize_options()
+{
+  int r = 0;
+
+  // mon_lease must be greater than mon_lease_renewal; otherwise we
+  // may incur in leases expiring before they are renewed.
+  if (g_conf->mon_lease <= g_conf->mon_lease_renew_interval) {
+    clog.error() << "mon_lease (" << g_conf->mon_lease
+                 << ") must be greater "
+                 << "than mon_lease_renew_interval ("
+                 << g_conf->mon_lease_renew_interval << ")";
+    r = -EINVAL;
+  }
+
+  // mon_lease_ack_timeout must be greater than mon_lease to make sure we've
+  // got time to renew the lease and get an ack for it. Having both options
+  // with the same value, for a given small vale, could mean timing out if
+  // the monitors happened to be overloaded -- or even under normal load for
+  // a small enough value.
+  if (g_conf->mon_lease_ack_timeout <= g_conf->mon_lease) {
+    clog.error() << "mon_lease_ack_timeout ("
+                 << g_conf->mon_lease_ack_timeout
+                 << ") must be greater than mon_lease ("
+                 << g_conf->mon_lease << ")";
+    r = -EINVAL;
+  }
+  return r;
+}
+
 int Monitor::preinit()
 {
   lock.Lock();
 
   dout(1) << "preinit fsid " << monmap->fsid << dendl;
-  
+
+  int r = sanitize_options();
+  if (r < 0) {
+    derr << "option sanitization failed!" << dendl;
+    return r;
+  }
+
   assert(!logger);
   {
     PerfCountersBuilder pcb(g_ceph_context, "mon", l_mon_first, l_mon_last);
-    // ...
+    pcb.add_u64(l_mon_num_sessions, "num_sessions");
+    pcb.add_u64_counter(l_mon_session_add, "session_add");
+    pcb.add_u64_counter(l_mon_session_rm, "session_rm");
+    pcb.add_u64_counter(l_mon_session_trim, "session_trim");
+    pcb.add_u64_counter(l_mon_num_elections, "num_elections");
+    pcb.add_u64_counter(l_mon_election_call, "election_call");
+    pcb.add_u64_counter(l_mon_election_win, "election_win");
+    pcb.add_u64_counter(l_mon_election_lose, "election_lose");
     logger = pcb.create_perf_counters();
     cct->get_perfcounters_collection()->add(logger);
   }
@@ -392,9 +462,9 @@ int Monitor::preinit()
     pcb.add_u64(l_cluster_num_osd_up, "num_osd_up");
     pcb.add_u64(l_cluster_num_osd_in, "num_osd_in");
     pcb.add_u64(l_cluster_osd_epoch, "osd_epoch");
-    pcb.add_u64(l_cluster_osd_kb, "osd_kb");
-    pcb.add_u64(l_cluster_osd_kb_used, "osd_kb_used");
-    pcb.add_u64(l_cluster_osd_kb_avail, "osd_kb_avail");
+    pcb.add_u64(l_cluster_osd_bytes, "osd_bytes");
+    pcb.add_u64(l_cluster_osd_bytes_used, "osd_bytes_used");
+    pcb.add_u64(l_cluster_osd_bytes_avail, "osd_bytes_avail");
     pcb.add_u64(l_cluster_num_pool, "num_pool");
     pcb.add_u64(l_cluster_num_pg, "num_pg");
     pcb.add_u64(l_cluster_num_pg_active_clean, "num_pg_active_clean");
@@ -402,6 +472,7 @@ int Monitor::preinit()
     pcb.add_u64(l_cluster_num_pg_peering, "num_pg_peering");
     pcb.add_u64(l_cluster_num_object, "num_object");
     pcb.add_u64(l_cluster_num_object_degraded, "num_object_degraded");
+    pcb.add_u64(l_cluster_num_object_misplaced, "num_object_misplaced");
     pcb.add_u64(l_cluster_num_object_unfound, "num_object_unfound");
     pcb.add_u64(l_cluster_num_bytes, "num_bytes");
     pcb.add_u64(l_cluster_num_mds_up, "num_mds_up");
@@ -410,6 +481,8 @@ int Monitor::preinit()
     pcb.add_u64(l_cluster_mds_epoch, "mds_epoch");
     cluster_logger = pcb.create_perf_counters();
   }
+
+  paxos->init_logger();
 
   // verify cluster_uuid
   {
@@ -443,6 +516,16 @@ int Monitor::preinit()
       dout(10) << " monmap is " << *monmap << dendl;
       dout(10) << " extra probe peers " << extra_probe_peers << dendl;
     }
+  } else if (!monmap->contains(name)) {
+    derr << "not in monmap and have been in a quorum before; "
+         << "must have been removed" << dendl;
+    if (g_conf->mon_force_quorum_join) {
+      dout(0) << "we should have died but "
+              << "'mon_force_quorum_join' is set -- allowing boot" << dendl;
+    } else {
+      derr << "commit suicide!" << dendl;
+      return -ENOENT;
+    }
   }
 
   {
@@ -472,35 +555,37 @@ int Monitor::preinit()
   init_paxos();
   health_monitor->init();
 
-  // we need to bootstrap authentication keys so we can form an
-  // initial quorum.
-  if (authmon()->get_last_committed() == 0) {
-    dout(10) << "loading initial keyring to bootstrap authentication for mkfs" << dendl;
-    bufferlist bl;
-    store->get("mkfs", "keyring", bl);
-    KeyRing keyring;
-    bufferlist::iterator p = bl.begin();
-    ::decode(keyring, p);
-    extract_save_mon_key(keyring);
-  }
-
-  string keyring_loc = g_conf->mon_data + "/keyring";
-
-  int r = keyring.load(cct, keyring_loc);
-  if (r < 0) {
-    EntityName mon_name;
-    mon_name.set_type(CEPH_ENTITY_TYPE_MON);
-    EntityAuth mon_key;
-    if (key_server.get_auth(mon_name, mon_key)) {
-      dout(1) << "copying mon. key from old db to external keyring" << dendl;
-      keyring.add(mon_name, mon_key);
+  if (is_keyring_required()) {
+    // we need to bootstrap authentication keys so we can form an
+    // initial quorum.
+    if (authmon()->get_last_committed() == 0) {
+      dout(10) << "loading initial keyring to bootstrap authentication for mkfs" << dendl;
       bufferlist bl;
-      keyring.encode_plaintext(bl);
-      write_default_keyring(bl);
-    } else {
-      derr << "unable to load initial keyring " << g_conf->keyring << dendl;
-      lock.Unlock();
-      return r;
+      store->get("mkfs", "keyring", bl);
+      KeyRing keyring;
+      bufferlist::iterator p = bl.begin();
+      ::decode(keyring, p);
+      extract_save_mon_key(keyring);
+    }
+
+    string keyring_loc = g_conf->mon_data + "/keyring";
+
+    r = keyring.load(cct, keyring_loc);
+    if (r < 0) {
+      EntityName mon_name;
+      mon_name.set_type(CEPH_ENTITY_TYPE_MON);
+      EntityAuth mon_key;
+      if (key_server.get_auth(mon_name, mon_key)) {
+	dout(1) << "copying mon. key from old db to external keyring" << dendl;
+	keyring.add(mon_name, mon_key);
+	bufferlist bl;
+	keyring.encode_plaintext(bl);
+	write_default_keyring(bl);
+      } else {
+	derr << "unable to load initial keyring " << g_conf->keyring << dendl;
+	lock.Unlock();
+	return r;
+      }
     }
   }
 
@@ -512,6 +597,11 @@ int Monitor::preinit()
   r = admin_socket->register_command("mon_status", "mon_status", admin_hook,
 				     "show current monitor status");
   assert(r == 0);
+  if (g_conf->mon_advanced_debug_mode) {
+    r = admin_socket->register_command("osdmonitor_prepare_command", "osdmonitor_prepare_command", admin_hook,
+				       "call OSDMonitor::prepare_command");
+    assert(r == 0);
+  }
   r = admin_socket->register_command("quorum_status", "quorum_status",
 				     admin_hook, "show current quorum status");
   assert(r == 0);
@@ -538,6 +628,9 @@ int Monitor::preinit()
                                      "force monitor out of the quorum");
   assert(r == 0);
   lock.Lock();
+
+  // add ourselves as a conf observer
+  g_conf->add_observer(this);
 
   lock.Unlock();
   return 0;
@@ -585,6 +678,21 @@ void Monitor::init_paxos()
 void Monitor::refresh_from_paxos(bool *need_bootstrap)
 {
   dout(10) << __func__ << dendl;
+
+  bufferlist bl;
+  int r = store->get(MONITOR_NAME, "cluster_fingerprint", bl);
+  if (r >= 0) {
+    try {
+      bufferlist::iterator p = bl.begin();
+      ::decode(fingerprint, p);
+    }
+    catch (buffer::error& e) {
+      dout(10) << __func__ << " failed to decode cluster_fingerprint" << dendl;
+    }
+  } else {
+    dout(10) << __func__ << " no cluster_fingerprint" << dendl;
+  }
+
   for (int i = 0; i < PAXOS_NUM; ++i) {
     paxos_service[i]->refresh(need_bootstrap);
   }
@@ -639,18 +747,6 @@ void Monitor::shutdown()
   }
 
   elector.shutdown();
-
-  if (logger) {
-    cct->get_perfcounters_collection()->remove(logger);
-    delete logger;
-    logger = NULL;
-  }
-  if (cluster_logger) {
-    if (cluster_logger_registered)
-      cct->get_perfcounters_collection()->remove(cluster_logger);
-    delete cluster_logger;
-    cluster_logger = NULL;
-  }
   
   // clean up
   paxos->shutdown();
@@ -664,6 +760,18 @@ void Monitor::shutdown()
   timer.shutdown();
 
   remove_all_sessions();
+
+  if (logger) {
+    cct->get_perfcounters_collection()->remove(logger);
+    delete logger;
+    logger = NULL;
+  }
+  if (cluster_logger) {
+    if (cluster_logger_registered)
+      cct->get_perfcounters_collection()->remove(cluster_logger);
+    delete cluster_logger;
+    cluster_logger = NULL;
+  }
 
   // unlock before msgr shutdown...
   lock.Unlock();
@@ -740,10 +848,34 @@ void Monitor::bootstrap()
   }
 }
 
+void Monitor::_osdmonitor_prepare_command(cmdmap_t& cmdmap, ostream& ss)
+{
+  if (!is_leader()) {
+    ss << "mon must be a leader";
+    return;
+  }
+
+  string cmd;
+  cmd_getval(g_ceph_context, cmdmap, "prepare", cmd);
+  cmdmap["prefix"] = cmdmap["prepare"];
+  
+  OSDMonitor *monitor = osdmon();
+  MMonCommand *m = static_cast<MMonCommand *>((new MMonCommand())->get());
+  if (monitor->prepare_command_impl(m, cmdmap))
+    ss << "true";
+  else
+    ss << "false";
+  m->put();
+}
+
 void Monitor::_add_bootstrap_peer_hint(string cmd, cmdmap_t& cmdmap, ostream& ss)
 {
   string addrstr;
-  cmd_getval(g_ceph_context, cmdmap, "addr", addrstr);
+  if (!cmd_getval(g_ceph_context, cmdmap, "addr", addrstr)) {
+    ss << "unable to parse address string value '"
+         << cmd_vartype_stringify(cmdmap["addr"]) << "'";
+    return;
+  }
   dout(10) << "_add_bootstrap_peer_hint '" << cmd << "' '"
            << addrstr << "'" << dendl;
 
@@ -862,7 +994,7 @@ void Monitor::sync_obtain_latest_monmap(bufferlist &bl)
 
   dout(1) << __func__ << " obtained monmap e" << latest_monmap.epoch << dendl;
 
-  latest_monmap.encode(bl, CEPH_FEATURES_ALL);
+  latest_monmap.encode(bl, quorum_features);
 }
 
 void Monitor::sync_reset_requester()
@@ -1036,7 +1168,7 @@ void Monitor::handle_sync(MMonSync *m)
 void Monitor::_sync_reply_no_cookie(MMonSync *m)
 {
   MMonSync *reply = new MMonSync(MMonSync::OP_NO_COOKIE, m->cookie);
-  messenger->send_message(reply, m->get_connection());
+  m->get_connection()->send_message(reply);
 }
 
 void Monitor::handle_sync_get_cookie(MMonSync *m)
@@ -1047,6 +1179,16 @@ void Monitor::handle_sync_get_cookie(MMonSync *m)
   }
 
   assert(g_conf->mon_sync_provider_kill_at != 1);
+
+  // make sure they can understand us.
+  if ((required_features ^ m->get_connection()->get_features()) &
+      required_features) {
+    dout(5) << " ignoring peer mon." << m->get_source().num()
+	    << " has features " << std::hex
+	    << m->get_connection()->get_features()
+	    << " but we require " << required_features << std::dec << dendl;
+    return;
+  }
 
   // make up a unique cookie.  include election epoch (which persists
   // across restarts for the whole cluster) and a counter for this
@@ -1078,7 +1220,7 @@ void Monitor::handle_sync_get_cookie(MMonSync *m)
 
   MMonSync *reply = new MMonSync(MMonSync::OP_COOKIE, sp.cookie);
   reply->last_committed = sp.last_committed;
-  messenger->send_message(reply, m->get_connection());
+  m->get_connection()->send_message(reply);
 }
 
 void Monitor::handle_sync_get_chunk(MMonSync *m)
@@ -1140,7 +1282,7 @@ void Monitor::handle_sync_get_chunk(MMonSync *m)
 
   ::encode(tx, reply->chunk_bl);
 
-  messenger->send_message(reply, m->get_connection());
+  m->get_connection()->send_message(reply);
 }
 
 // requester
@@ -1304,6 +1446,13 @@ void Monitor::handle_probe(MMonProbe *m)
     handle_probe_reply(m);
     break;
 
+  case MMonProbe::OP_MISSING_FEATURES:
+    derr << __func__ << " missing features, have " << CEPH_FEATURES_ALL
+	 << ", required " << required_features
+	 << ", missing " << (required_features & ~CEPH_FEATURES_ALL)
+	 << dendl;
+    break;
+
   default:
     m->put();
   }
@@ -1314,20 +1463,38 @@ void Monitor::handle_probe(MMonProbe *m)
  */
 void Monitor::handle_probe_probe(MMonProbe *m)
 {
-  dout(10) << "handle_probe_probe " << m->get_source_inst() << *m << dendl;
-  MMonProbe *r = new MMonProbe(monmap->fsid, MMonProbe::OP_REPLY, name, has_ever_joined);
+  dout(10) << "handle_probe_probe " << m->get_source_inst() << *m
+	   << " features " << m->get_connection()->get_features() << dendl;
+  uint64_t missing = required_features & ~m->get_connection()->get_features();
+  if (missing) {
+    dout(1) << " peer " << m->get_source_addr() << " missing features "
+	    << missing << dendl;
+    if (m->get_connection()->has_feature(CEPH_FEATURE_OSD_PRIMARY_AFFINITY)) {
+      MMonProbe *r = new MMonProbe(monmap->fsid, MMonProbe::OP_MISSING_FEATURES,
+				   name, has_ever_joined);
+      m->required_features = required_features;
+      m->get_connection()->send_message(r);
+    }
+    m->put();
+    return;
+  }
+
+  MMonProbe *r = new MMonProbe(monmap->fsid, MMonProbe::OP_REPLY,
+			       name, has_ever_joined);
   r->name = name;
   r->quorum = quorum;
   monmap->encode(r->monmap_bl, m->get_connection()->get_features());
   r->paxos_first_version = paxos->get_first_committed();
   r->paxos_last_version = paxos->get_version();
-  messenger->send_message(r, m->get_connection());
+  m->get_connection()->send_message(r);
 
   // did we discover a peer here?
   if (!monmap->contains(m->get_source_addr())) {
-    dout(1) << " adding peer " << m->get_source_addr() << " to list of hints" << dendl;
+    dout(1) << " adding peer " << m->get_source_addr()
+	    << " to list of hints" << dendl;
     extra_probe_peers.insert(m->get_source_addr());
   }
+
   m->put();
 }
 
@@ -1382,15 +1549,15 @@ void Monitor::handle_probe_reply(MMonProbe *m)
   }
 
   // new initial peer?
-  if (monmap->contains(m->name)) {
-    if (monmap->get_addr(m->name).is_blank_ip()) {
-      dout(1) << " learned initial mon " << m->name << " addr " << m->get_source_addr() << dendl;
-      monmap->set_addr(m->name, m->get_source_addr());
-      m->put();
+  if (monmap->get_epoch() == 0 &&
+      monmap->contains(m->name) &&
+      monmap->get_addr(m->name).is_blank_ip()) {
+    dout(1) << " learned initial mon " << m->name << " addr " << m->get_source_addr() << dendl;
+    monmap->set_addr(m->name, m->get_source_addr());
+    m->put();
 
-      bootstrap();
-      return;
-    }
+    bootstrap();
+    return;
   }
 
   // end discover phase
@@ -1487,6 +1654,9 @@ void Monitor::join_election()
 {
   dout(10) << __func__ << dendl;
   state = STATE_ELECTING;
+
+  logger->inc(l_mon_num_elections);
+
   _reset();
 }
 
@@ -1495,6 +1665,9 @@ void Monitor::start_election()
   dout(10) << "start_election" << dendl;
   state = STATE_ELECTING;
   _reset();
+
+  logger->inc(l_mon_num_elections);
+  logger->inc(l_mon_election_call);
 
   cancel_probe_timeout();
 
@@ -1554,12 +1727,24 @@ void Monitor::win_election(epoch_t epoch, set<int>& active, uint64_t features,
     classic_mons = *classic_monitors;
 
   paxos->leader_init();
-  for (vector<PaxosService*>::iterator p = paxos_service.begin(); p != paxos_service.end(); ++p)
-    (*p)->election_finished();
+  // NOTE: tell monmap monitor first.  This is important for the
+  // bootstrap case to ensure that the very first paxos proposal
+  // codifies the monmap.  Otherwise any manner of chaos can ensue
+  // when monitors are call elections or participating in a paxos
+  // round without agreeing on who the participants are.
+  monmon()->election_finished();
+  for (vector<PaxosService*>::iterator p = paxos_service.begin();
+       p != paxos_service.end(); ++p) {
+    if (*p != monmon())
+      (*p)->election_finished();
+  }
   health_monitor->start(epoch);
 
+  logger->inc(l_mon_election_win);
+
   finish_election();
-  if (monmap->size() > 1)
+  if (monmap->size() > 1 &&
+      monmap->get_epoch() > 0)
     timecheck_start();
 }
 
@@ -1579,11 +1764,14 @@ void Monitor::lose_election(epoch_t epoch, set<int> &q, int l, uint64_t features
     (*p)->election_finished();
   health_monitor->start(epoch);
 
+  logger->inc(l_mon_election_win);
+
   finish_election();
 }
 
 void Monitor::finish_election()
 {
+  apply_quorum_to_compatset_features();
   timecheck_finish();
   exited_quorum = utime_t();
   finish_contexts(g_ceph_context, waitfor_quorum);
@@ -1601,6 +1789,40 @@ void Monitor::finish_election()
   }
 }
 
+void Monitor::apply_quorum_to_compatset_features()
+{
+  CompatSet new_features(features);
+  if (quorum_features & CEPH_FEATURE_OSD_ERASURE_CODES) {
+    new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_OSD_ERASURE_CODES);
+  }
+  if (quorum_features & CEPH_FEATURE_OSDMAP_ENC) {
+    new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_OSDMAP_ENC);
+  }
+
+  if (new_features.compare(features) != 0) {
+    CompatSet diff = features.unsupported(new_features);
+    dout(1) << __func__ << " enabling new quorum features: " << diff << dendl;
+    features = new_features;
+
+    MonitorDBStore::Transaction t;
+    write_features(t);
+    store->apply_transaction(t);
+
+    apply_compatset_features_to_quorum_requirements();
+  }
+}
+
+void Monitor::apply_compatset_features_to_quorum_requirements()
+{
+  required_features = 0;
+  if (features.incompat.contains(CEPH_MON_FEATURE_INCOMPAT_OSD_ERASURE_CODES)) {
+    required_features |= CEPH_FEATURE_OSD_ERASURE_CODES;
+  }
+  if (features.incompat.contains(CEPH_MON_FEATURE_INCOMPAT_OSDMAP_ENC)) {
+    required_features |= CEPH_FEATURE_OSDMAP_ENC;
+  }
+  dout(10) << __func__ << " required_features " << required_features << dendl;
+}
 
 void Monitor::sync_force(Formatter *f, ostream& ss)
 {
@@ -1643,9 +1865,9 @@ void Monitor::_quorum_status(Formatter *f, ostream& ss)
     f->dump_int("mon", *p);
   f->close_section(); // quorum
 
-  set<string> quorum_names = get_quorum_names();
+  list<string> quorum_names = get_quorum_names();
   f->open_array_section("quorum_names");
-  for (set<string>::iterator p = quorum_names.begin(); p != quorum_names.end(); ++p)
+  for (list<string>::iterator p = quorum_names.begin(); p != quorum_names.end(); ++p)
     f->dump_string("mon", *p);
   f->close_section(); // quorum_names
 
@@ -1661,7 +1883,7 @@ void Monitor::_quorum_status(Formatter *f, ostream& ss)
     delete f;
 }
 
-void Monitor::_mon_status(Formatter *f, ostream& ss)
+void Monitor::get_mon_status(Formatter *f, ostream& ss)
 {
   bool free_formatter = false;
 
@@ -1749,22 +1971,24 @@ void Monitor::get_health(string& status, bufferlist *detailbl, Formatter *f)
     s->get_health(summary, detailbl ? &detail : NULL);
   }
 
+  health_monitor->get_health(f, summary, (detailbl ? &detail : NULL));
+
   if (f)
     f->open_array_section("summary");
   stringstream ss;
   health_status_t overall = HEALTH_OK;
   if (!summary.empty()) {
-    if (f) {
-      f->open_object_section("item");
-      f->dump_stream("severity") <<  summary.front().first;
-      f->dump_string("summary", summary.front().second);
-      f->close_section();
-    }
     ss << ' ';
     while (!summary.empty()) {
       if (overall > summary.front().first)
 	overall = summary.front().first;
       ss << summary.front().second;
+      if (f) {
+        f->open_object_section("item");
+        f->dump_stream("severity") <<  summary.front().first;
+        f->dump_string("summary", summary.front().second);
+        f->close_section();
+      }
       summary.pop_front();
       if (!summary.empty())
 	ss << "; ";
@@ -1775,7 +1999,7 @@ void Monitor::get_health(string& status, bufferlist *detailbl, Formatter *f)
 
   if (f) {
     f->open_object_section("timechecks");
-    f->dump_int("epoch", get_epoch());
+    f->dump_unsigned("epoch", get_epoch());
     f->dump_int("round", timecheck_round);
     f->dump_stream("round_status")
       << ((timecheck_round%2) ? "on-going" : "finished");
@@ -1834,10 +2058,6 @@ void Monitor::get_health(string& status, bufferlist *detailbl, Formatter *f)
   if (f)
     f->close_section();
 
-  health_status_t hmstatus = health_monitor->get_health(f, (detailbl ? &detail : NULL));
-  if (overall > hmstatus)
-    overall = hmstatus;
-
   stringstream fss;
   fss << overall;
   status = fss.str() + ss.str();
@@ -1862,7 +2082,7 @@ void Monitor::get_health(string& status, bufferlist *detailbl, Formatter *f)
     f->close_section();
 }
 
-void Monitor::get_status(stringstream &ss, Formatter *f)
+void Monitor::get_cluster_status(stringstream &ss, Formatter *f)
 {
   if (f)
     f->open_object_section("status");
@@ -1901,8 +2121,8 @@ void Monitor::get_status(stringstream &ss, Formatter *f)
     ss << "    cluster " << monmap->get_fsid() << "\n";
     ss << "     health " << health << "\n";
     ss << "     monmap " << *monmap << ", election epoch " << get_epoch()
-      << ", quorum " << get_quorum() << " " << get_quorum_names() << "\n";
-    if (mdsmon()->mdsmap.get_epoch() > 1)
+       << ", quorum " << get_quorum() << " " << get_quorum_names() << "\n";
+    if (mdsmon()->mdsmap.get_enabled())
       ss << "     mdsmap " << mdsmon()->mdsmap << "\n";
     osdmon()->osdmap.print_summary(NULL, ss);
     pgmon()->pg_map.print_summary(NULL, &ss);
@@ -1947,7 +2167,7 @@ const MonCommand *Monitor::_get_moncommand(const string &cmd_prefix,
 
 bool Monitor::_allowed_command(MonSession *s, string &module, string &prefix,
                                const map<string,cmd_vartype>& cmdmap,
-                               const map<string,string> param_str_map,
+                               const map<string,string>& param_str_map,
                                const MonCommand *this_cmd) {
 
   bool cmd_r = (this_cmd->req_perms.find('r') != string::npos);
@@ -2007,6 +2227,17 @@ void Monitor::set_leader_supported_commands(const MonCommand *cmds, int size)
     delete[] leader_supported_mon_commands;
   leader_supported_mon_commands = cmds;
   leader_supported_mon_commands_size = size;
+}
+
+bool Monitor::is_keyring_required()
+{
+  string auth_cluster_required = g_conf->auth_supported.length() ?
+    g_conf->auth_supported : g_conf->auth_cluster_required;
+  string auth_service_required = g_conf->auth_supported.length() ?
+    g_conf->auth_supported : g_conf->auth_service_required;
+
+  return auth_service_required == "cephx" ||
+    auth_cluster_required == "cephx";
 }
 
 void Monitor::handle_command(MMonCommand *m)
@@ -2103,7 +2334,7 @@ void Monitor::handle_command(MMonCommand *m)
     return;
   }
 
-  if (module == "mds") {
+  if (module == "mds" || module == "fs") {
     mdsmon()->dispatch(m);
     return;
   }
@@ -2193,8 +2424,8 @@ void Monitor::handle_command(MMonCommand *m)
     cmd_getval(g_ceph_context, cmdmap, "detail", detail);
 
     if (prefix == "status") {
-      // get_status handles f == NULL
-      get_status(ds, f.get());
+      // get_cluster_status handles f == NULL
+      get_cluster_status(ds, f.get());
 
       if (f) {
         f->flush(ds);
@@ -2244,6 +2475,7 @@ void Monitor::handle_command(MMonCommand *m)
     if (!f)
       f.reset(new_formatter("json-pretty"));
     f->open_object_section("report");
+    f->dump_stream("cluster_fingerprint") << fingerprint;
     f->dump_string("version", ceph_version_to_str());
     f->dump_string("commit", git_version_to_str());
     f->dump_stream("timestamp") << ceph_clock_now(NULL);
@@ -2285,7 +2517,7 @@ void Monitor::handle_command(MMonCommand *m)
     rs = "";
     r = 0;
   } else if (prefix == "mon_status") {
-    _mon_status(f.get(), ds);
+    get_mon_status(f.get(), ds);
     if (f)
       f->flush(ds);
     rdata.append(ds);
@@ -2333,6 +2565,9 @@ void Monitor::handle_command(MMonCommand *m)
       start_election();
       rs = "started responding to quorum, initiated new election";
       r = 0;
+    } else {
+      rs = "needs a valid 'quorum' command";
+      r = -EINVAL;
     }
   }
 
@@ -2384,6 +2619,7 @@ void Monitor::forward_request_leader(PaxosServiceMessage *req)
     rr->tid = ++routed_request_tid;
     rr->client_inst = req->get_source_inst();
     rr->con = req->get_connection();
+    rr->con_features = rr->con->get_features();
     encode_message(req, CEPH_FEATURES_ALL, rr->request_bl);   // for my use only; use all features
     rr->session = static_cast<MonSession *>(session->get());
     routed_requests[rr->tid] = rr;
@@ -2391,7 +2627,9 @@ void Monitor::forward_request_leader(PaxosServiceMessage *req)
     
     dout(10) << "forward_request " << rr->tid << " request " << *req << dendl;
 
-    MForward *forward = new MForward(rr->tid, req, rr->session->caps);
+    MForward *forward = new MForward(rr->tid, req,
+				     rr->con_features,
+				     rr->session->caps);
     forward->set_priority(req->get_priority());
     messenger->send_message(forward, monmap->get_inst(mon));
   } else {
@@ -2414,11 +2652,15 @@ void Monitor::handle_forward(MForward *m)
     dout(0) << "forward from entity with insufficient caps! " 
 	    << session->caps << dendl;
   } else {
-    Connection *c = new Connection(NULL);  // msgr must be null; see PaxosService::dispatch()
-    MonSession *s = new MonSession(m->msg->get_source_inst(), c);
-    c->set_priv(s);
+    // see PaxosService::dispatch(); we rely on this being anon
+    // (c->msgr == NULL)
+    ConnectionRef c = messenger->create_anon_connection();
+    MonSession *s = new MonSession(m->msg->get_source_inst(),
+				   static_cast<Connection*>(c.get()));
+    c->set_priv(s->get());
     c->set_peer_addr(m->client.addr);
     c->set_peer_type(m->client.name.type());
+    c->set_features(m->con_features);
 
     s->caps = m->client_caps;
     dout(10) << " caps are " << s->caps << dendl;
@@ -2451,6 +2693,7 @@ void Monitor::handle_forward(MForward *m)
     dout(10) << " mesg " << req << " from " << m->get_source_addr() << dendl;
 
     _ms_dispatch(req);
+    s->put();
   }
   session->put();
   m->put();
@@ -2461,7 +2704,7 @@ void Monitor::try_send_message(Message *m, const entity_inst_t& to)
   dout(10) << "try_send_message " << *m << " to " << to << dendl;
 
   bufferlist bl;
-  encode_message(m, CEPH_FEATURES_ALL, bl);  // fixme: assume peers have all features we do.
+  encode_message(m, quorum_features, bl);
 
   messenger->send_message(m, to);
 
@@ -2473,7 +2716,14 @@ void Monitor::try_send_message(Message *m, const entity_inst_t& to)
 
 void Monitor::send_reply(PaxosServiceMessage *req, Message *reply)
 {
-  MonSession *session = static_cast<MonSession*>(req->get_connection()->get_priv());
+  ConnectionRef connection = req->get_connection();
+  if (!connection) {
+    dout(2) << "send_reply no connection, dropping reply " << *reply
+	    << " to " << req << " " << *req << dendl;
+    reply->put();
+    return;
+  }
+  MonSession *session = static_cast<MonSession*>(connection->get_priv());
   if (!session) {
     dout(2) << "send_reply no session, dropping reply " << *reply
 	    << " to " << req << " " << *req << dendl;
@@ -2484,10 +2734,9 @@ void Monitor::send_reply(PaxosServiceMessage *req, Message *reply)
     dout(15) << "send_reply routing reply to " << req->get_connection()->get_peer_addr()
 	     << " via " << session->proxy_con->get_peer_addr()
 	     << " for request " << *req << dendl;
-    messenger->send_message(new MRoute(session->proxy_tid, reply),
-			    session->proxy_con);    
+    session->proxy_con->send_message(new MRoute(session->proxy_tid, reply));
   } else {
-    messenger->send_message(reply, session->con);
+    session->con->send_message(reply);
   }
   session->put();
 }
@@ -2504,8 +2753,7 @@ void Monitor::no_reply(PaxosServiceMessage *req)
       dout(10) << "no_reply to " << req->get_source_inst()
 	       << " via " << session->proxy_con->get_peer_addr()
 	       << " for request " << *req << dendl;
-      messenger->send_message(new MRoute(session->proxy_tid, NULL),
-			      session->proxy_con);
+      session->proxy_con->send_message(new MRoute(session->proxy_tid, NULL));
     } else {
       dout(10) << "no_reply no quorum nullroute feature for " << req->get_source_inst()
 	       << " via " << session->proxy_con->get_peer_addr()
@@ -2541,7 +2789,7 @@ void Monitor::handle_route(MRoute *m)
       // reset payload, in case encoding is dependent on target features
       if (m->msg) {
 	m->msg->clear_payload();
-	messenger->send_message(m->msg, rr->con);
+	rr->con->send_message(m->msg);
 	m->msg = NULL;
       }
       routed_requests.erase(m->session_mon_tid);
@@ -2553,7 +2801,7 @@ void Monitor::handle_route(MRoute *m)
   } else {
     dout(10) << " not a routed request, trying to send anyway" << dendl;
     if (m->msg) {
-      messenger->lazy_send_message(m->msg, m->dest);
+      messenger->send_message(m->msg, m->dest);
       m->msg = NULL;
     }
   }
@@ -2582,7 +2830,8 @@ void Monitor::resend_routed_requests()
       delete rr;
     } else {
       dout(10) << " resend to mon." << mon << " tid " << rr->tid << " " << *req << dendl;
-      MForward *forward = new MForward(rr->tid, req, rr->session->caps);
+      MForward *forward = new MForward(rr->tid, req, rr->con_features,
+				       rr->session->caps);
       forward->client = rr->client_inst;
       forward->set_priority(req->get_priority());
       messenger->send_message(forward, monmap->get_inst(mon));
@@ -2610,6 +2859,8 @@ void Monitor::remove_session(MonSession *s)
   }
   s->con->set_priv(NULL);
   session_map.remove_session(s);
+  logger->set(l_mon_num_sessions, session_map.get_size());
+  logger->inc(l_mon_session_rm);
 }
 
 void Monitor::remove_all_sessions()
@@ -2617,7 +2868,9 @@ void Monitor::remove_all_sessions()
   while (!session_map.sessions.empty()) {
     MonSession *s = session_map.sessions.front();
     remove_session(s);
+    logger->inc(l_mon_session_rm);
   }
+  logger->set(l_mon_num_sessions, session_map.get_size());
 }
 
 void Monitor::send_command(const entity_inst_t& inst,
@@ -2653,7 +2906,7 @@ void Monitor::waitlist_or_zap_client(Message *m)
     maybe_wait_for_quorum.push_back(new C_RetryMessage(this, m));
   } else {
     dout(5) << "discarding message " << *m << " and sending client elsewhere" << dendl;
-    messenger->mark_down(con);
+    con->mark_down();
     m->put();
   }
 }
@@ -2715,6 +2968,9 @@ bool Monitor::_ms_dispatch(Message *m)
     s = session_map.new_session(m->get_source_inst(), m->get_connection().get());
     m->get_connection()->set_priv(s->get());
     dout(10) << "ms_dispatch new session " << s << " for " << s->inst << dendl;
+
+    logger->set(l_mon_num_sessions, session_map.get_size());
+    logger->inc(l_mon_session_add);
 
     if (!src_is_mon) {
       dout(10) << "setting timeout on session" << dendl;
@@ -2937,7 +3193,7 @@ void Monitor::handle_ping(MPing *m)
   get_health(health_str, NULL, f);
   {
     stringstream ss;
-    _mon_status(f, ss);
+    get_mon_status(f, ss);
   }
 
   f->close_section();
@@ -3297,7 +3553,7 @@ void Monitor::handle_timecheck_peon(MTimeCheck *m)
   reply->round = m->round;
   dout(10) << __func__ << " send " << *m
            << " to " << m->get_source_inst() << dendl;
-  messenger->send_message(reply, m->get_connection());
+  m->get_connection()->send_message(reply);
 }
 
 void Monitor::handle_timecheck(MTimeCheck *m)
@@ -3370,8 +3626,7 @@ void Monitor::handle_subscribe(MMonSubscribe *m)
   // ???
 
   if (reply)
-    messenger->send_message(new MMonSubscribeAck(monmap->get_fsid(), (int)g_conf->mon_subscribe_interval),
-			    m->get_source_inst());
+    m->get_connection()->send_message(new MMonSubscribeAck(monmap->get_fsid(), (int)g_conf->mon_subscribe_interval));
 
   s->put();
   m->put();
@@ -3380,6 +3635,7 @@ void Monitor::handle_subscribe(MMonSubscribe *m)
 void Monitor::handle_get_version(MMonGetVersion *m)
 {
   dout(10) << "handle_get_version " << *m << dendl;
+  PaxosService *svc = NULL;
 
   MonSession *s = static_cast<MonSession *>(m->get_connection()->get_priv());
   if (!s) {
@@ -3388,25 +3644,41 @@ void Monitor::handle_get_version(MMonGetVersion *m)
     return;
   }
 
-  MMonGetVersionReply *reply = new MMonGetVersionReply();
-  reply->handle = m->handle;
+  if (!is_leader() && !is_peon()) {
+    dout(10) << " waiting for quorum" << dendl;
+    waitfor_quorum.push_back(new C_RetryMessage(this, m));
+    goto out;
+  }
+
   if (m->what == "mdsmap") {
-    reply->version = mdsmon()->mdsmap.get_epoch();
-    reply->oldest_version = mdsmon()->get_first_committed();
+    svc = mdsmon();
   } else if (m->what == "osdmap") {
-    reply->version = osdmon()->osdmap.get_epoch();
-    reply->oldest_version = osdmon()->get_first_committed();
+    svc = osdmon();
   } else if (m->what == "monmap") {
-    reply->version = monmap->get_epoch();
-    reply->oldest_version = monmon()->get_first_committed();
+    svc = monmon();
   } else {
     derr << "invalid map type " << m->what << dendl;
   }
 
-  messenger->send_message(reply, m->get_source_inst());
+  if (svc) {
+    if (!svc->is_readable()) {
+      svc->wait_for_readable(new C_RetryMessage(this, m));
+      goto out;
+    }
 
-  s->put();
+    MMonGetVersionReply *reply = new MMonGetVersionReply();
+    reply->handle = m->handle;
+    reply->version = svc->get_last_committed();
+    reply->oldest_version = svc->get_first_committed();
+    reply->set_tid(m->get_tid());
+
+    m->get_connection()->send_message(reply);
+  }
+
   m->put();
+
+ out:
+  s->put();
 }
 
 bool Monitor::ms_handle_reset(Connection *con)
@@ -3468,7 +3740,7 @@ void Monitor::send_latest_monmap(Connection *con)
 {
   bufferlist bl;
   monmap->encode(bl, con->get_features());
-  messenger->send_message(new MMonMap(bl), con);
+  con->send_message(new MMonMap(bl));
 }
 
 void Monitor::handle_mon_get_map(MMonGetMap *m)
@@ -3531,7 +3803,7 @@ void Monitor::handle_scrub(MMonScrub *m)
 	break;
       MMonScrub *reply = new MMonScrub(MMonScrub::OP_RESULT, m->version);
       _scrub(&reply->result);
-      messenger->send_message(reply, m->get_connection());
+      m->get_connection()->send_message(reply);
     }
     break;
 
@@ -3639,6 +3911,10 @@ void Monitor::tick()
   // trim sessions
   utime_t now = ceph_clock_now(g_ceph_context);
   xlist<MonSession*>::iterator p = session_map.sessions.begin();
+
+  bool out_for_too_long = (!exited_quorum.is_zero()
+      && now > (exited_quorum + 2*g_conf->mon_lease));
+
   while (!p.end()) {
     MonSession *s = *p;
     ++p;
@@ -3650,17 +3926,17 @@ void Monitor::tick()
     if (!s->until.is_zero() && s->until < now) {
       dout(10) << " trimming session " << s->con << " " << s->inst
 	       << " (until " << s->until << " < now " << now << ")" << dendl;
-      messenger->mark_down(s->con);
-      remove_session(s);
-    } else if (!exited_quorum.is_zero()) {
-      if (now > (exited_quorum + 2 * g_conf->mon_lease)) {
-        // boot the client Session because we've taken too long getting back in
-        dout(10) << " trimming session " << s->con << " " << s->inst
-		 << " because we've been out of quorum too long" << dendl;
-        messenger->mark_down(s->con);
-        remove_session(s);
-      }
+    } else if (out_for_too_long) {
+      // boot the client Session because we've taken too long getting back in
+      dout(10) << " trimming session " << s->con << " " << s->inst
+        << " because we've been out of quorum too long" << dendl;
+    } else {
+      continue;
     }
+
+    s->con->mark_down();
+    remove_session(s);
+    logger->inc(l_mon_session_trim);
   }
 
   sync_trim_providers();
@@ -3669,7 +3945,27 @@ void Monitor::tick()
     finish_contexts(g_ceph_context, maybe_wait_for_quorum);
   }
 
+  if (is_leader() && paxos->is_active() && fingerprint.is_zero()) {
+    // this is only necessary on upgraded clusters.
+    MonitorDBStore::Transaction t;
+    prepare_new_fingerprint(&t);
+    bufferlist tbl;
+    t.encode(tbl);
+    paxos->propose_new_value(tbl, new C_NoopContext);
+  }
+
   new_tick();
+}
+
+void Monitor::prepare_new_fingerprint(MonitorDBStore::Transaction *t)
+{
+  uuid_d nf;
+  nf.generate_random();
+  dout(10) << __func__ << " proposing cluster_fingerprint " << nf << dendl;
+
+  bufferlist bl;
+  ::encode(nf, bl);
+  t->put(MONITOR_NAME, "cluster_fingerprint", bl);
 }
 
 int Monitor::check_fsid()
@@ -3766,25 +4062,43 @@ int Monitor::mkfs(bufferlist& osdmapbl)
     t.put("mkfs", "osdmap", osdmapbl);
   }
 
-  KeyRing keyring;
-  string keyring_filename;
-  if (!ceph_resolve_file_search(g_conf->keyring, keyring_filename)) {
-    derr << "unable to find a keyring file on " << g_conf->keyring << dendl;
-    return -ENOENT;
+  if (is_keyring_required()) {
+    KeyRing keyring;
+    string keyring_filename;
+    if (!ceph_resolve_file_search(g_conf->keyring, keyring_filename)) {
+      derr << "unable to find a keyring file on " << g_conf->keyring << dendl;
+      if (g_conf->key != "") {
+	string keyring_plaintext = "[mon.]\n\tkey = " + g_conf->key +
+	  "\n\tcaps mon = \"allow *\"\n";
+	bufferlist bl;
+	bl.append(keyring_plaintext);
+	try {
+	  bufferlist::iterator i = bl.begin();
+	  keyring.decode_plaintext(i);
+	}
+	catch (const buffer::error& e) {
+	  derr << "error decoding keyring " << keyring_plaintext
+	       << ": " << e.what() << dendl;
+	  return -EINVAL;
+	}
+      } else {
+	return -ENOENT;
+      }
+    } else {
+      r = keyring.load(g_ceph_context, keyring_filename);
+      if (r < 0) {
+	derr << "unable to load initial keyring " << g_conf->keyring << dendl;
+	return r;
+      }
+    }
+
+    // put mon. key in external keyring; seed with everything else.
+    extract_save_mon_key(keyring);
+
+    bufferlist keyringbl;
+    keyring.encode_plaintext(keyringbl);
+    t.put("mkfs", "keyring", keyringbl);
   }
-
-  r = keyring.load(g_ceph_context, keyring_filename);
-  if (r < 0) {
-    derr << "unable to load initial keyring " << g_conf->keyring << dendl;
-    return r;
-  }
-
-  // put mon. key in external keyring; seed with everything else.
-  extract_save_mon_key(keyring);
-
-  bufferlist keyringbl;
-  keyring.encode_plaintext(keyringbl);
-  t.put("mkfs", "keyring", keyringbl);
   write_fsid(t);
   store->apply_transaction(t);
 
@@ -3930,7 +4244,7 @@ bool Monitor::ms_verify_authorizer(Connection *con, int peer_type,
     isvalid = true;
   }
   return true;
-};
+}
 
 #undef dout_prefix
 #define dout_prefix *_dout

@@ -111,7 +111,7 @@ struct CephXServerChallenge {
     ::decode(server_challenge, bl);
   }
 };
-WRITE_CLASS_ENCODER(CephXServerChallenge);
+WRITE_CLASS_ENCODER(CephXServerChallenge)
 
 
 // request/reply headers, for subsequent exchanges.
@@ -126,7 +126,7 @@ struct CephXRequestHeader {
     ::decode(request_type, bl);
   }
 };
-WRITE_CLASS_ENCODER(CephXRequestHeader);
+WRITE_CLASS_ENCODER(CephXRequestHeader)
 
 struct CephXResponseHeader {
   uint16_t request_type;
@@ -141,7 +141,7 @@ struct CephXResponseHeader {
     ::decode(status, bl);
   }
 };
-WRITE_CLASS_ENCODER(CephXResponseHeader);
+WRITE_CLASS_ENCODER(CephXResponseHeader)
 
 struct CephXTicketBlob {
   uint64_t secret_id;
@@ -163,7 +163,7 @@ struct CephXTicketBlob {
     ::decode(blob, bl);
   }
 };
-WRITE_CLASS_ENCODER(CephXTicketBlob);
+WRITE_CLASS_ENCODER(CephXTicketBlob)
 
 // client -> server response to challenge
 struct CephXAuthenticate {
@@ -248,7 +248,7 @@ struct CephXServiceTicketRequest {
     ::decode(keys, bl);
   }
 };
-WRITE_CLASS_ENCODER(CephXServiceTicketRequest);
+WRITE_CLASS_ENCODER(CephXServiceTicketRequest)
 
 
 /*
@@ -268,7 +268,7 @@ struct CephXAuthorizeReply {
     ::decode(nonce_plus_one, bl);
   }
 };
-WRITE_CLASS_ENCODER(CephXAuthorizeReply);
+WRITE_CLASS_ENCODER(CephXAuthorizeReply)
 
 
 struct CephXAuthorizer : public AuthAuthorizer {
@@ -303,10 +303,10 @@ struct CephXTicketHandler {
   bool verify_service_ticket_reply(CryptoKey& principal_secret,
 				 bufferlist::iterator& indata);
   // to access the service
-  CephXAuthorizer *build_authorizer(uint64_t global_id);
+  CephXAuthorizer *build_authorizer(uint64_t global_id) const;
 
   bool have_key();
-  bool need_key();
+  bool need_key() const;
 
   void invalidate_ticket() {
     have_key_flag = 0;
@@ -335,9 +335,9 @@ struct CephXTicketManager {
     assert(res.second);
     return res.first->second;
   }
-  CephXAuthorizer *build_authorizer(uint32_t service_id);
+  CephXAuthorizer *build_authorizer(uint32_t service_id) const;
   bool have_key(uint32_t service_id);
-  bool need_key(uint32_t service_id);
+  bool need_key(uint32_t service_id) const;
   void set_have_need_key(uint32_t service_id, uint32_t& have, uint32_t& need);
   void validate_tickets(uint32_t mask, uint32_t& have, uint32_t& need);
   void invalidate_ticket(uint32_t service_id);
@@ -365,7 +365,7 @@ struct CephXServiceTicket {
     ::decode(validity, bl);
   }
 };
-WRITE_CLASS_ENCODER(CephXServiceTicket);
+WRITE_CLASS_ENCODER(CephXServiceTicket)
 
 /* B */
 struct CephXServiceTicketInfo {
@@ -385,7 +385,7 @@ struct CephXServiceTicketInfo {
     ::decode(session_key, bl);
   }
 };
-WRITE_CLASS_ENCODER(CephXServiceTicketInfo);
+WRITE_CLASS_ENCODER(CephXServiceTicketInfo)
 
 struct CephXAuthorize {
   uint64_t nonce;
@@ -400,7 +400,7 @@ struct CephXAuthorize {
     ::decode(nonce, bl);
   }
 };
-WRITE_CLASS_ENCODER(CephXAuthorize);
+WRITE_CLASS_ENCODER(CephXAuthorize)
 
 /*
  * Decode an extract ticket

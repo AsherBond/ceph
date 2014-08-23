@@ -1,3 +1,6 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+
 #include <errno.h>
 
 #include "json_spirit/json_spirit.h"
@@ -101,6 +104,8 @@ req_info::req_info(CephContext *cct, class RGWEnv *e) : env(e) {
   if (pos >= 0) {
     request_params = request_uri.substr(pos + 1);
     request_uri = request_uri.substr(0, pos);
+  } else {
+    request_params = env->get("QUERY_STRING", "");
   }
   host = env->get("HTTP_HOST");
 }
@@ -149,6 +154,7 @@ req_state::req_state(CephContext *_cct, class RGWEnv *e) : cct(_cct), cio(NULL),
   perm_mask = 0;
   content_length = 0;
   object = NULL;
+  bucket_exists = false;
   has_bad_meta = false;
   length = NULL;
   copy_source = NULL;
@@ -185,8 +191,8 @@ void req_info::init_meta_info(bool *found_bad_meta)
 {
   x_meta_map.clear();
 
-  map<string, string>& m = env->get_map();
-  map<string, string>::iterator iter;
+  map<string, string, ltstr_nocase>& m = env->get_map();
+  map<string, string, ltstr_nocase>::iterator iter;
   for (iter = m.begin(); iter != m.end(); ++iter) {
     const char *prefix;
     const string& header_name = iter->first;
@@ -490,13 +496,13 @@ int NameVal::parse()
 
 int XMLArgs::parse()
 {
-  int pos = 0, fpos;
+  int pos = 0;
   bool end = false;
   bool admin_subresource_added = false; 
   if (str[pos] == '?') pos++;
 
   while (!end) {
-    fpos = str.find('&', pos);
+    int fpos = str.find('&', pos);
     if (fpos  < pos) {
        end = true;
        fpos = str.size(); 
@@ -542,6 +548,7 @@ int XMLArgs::parse()
           (name.compare("caps") == 0) ||
           (name.compare("index") == 0) ||
           (name.compare("policy") == 0) ||
+          (name.compare("quota") == 0) ||
           (name.compare("object") == 0)) {
 
         if (!admin_subresource_added) {
@@ -693,13 +700,15 @@ bool url_decode(string& src_str, string& dest_str)
   int pos = 0;
   char c;
 
+  bool in_query = false;
   while (*src) {
     if (*src != '%') {
-      if (*src != '+') {
-	dest[pos++] = *src++;
+      if (!in_query || *src != '+') {
+        if (*src == '?') in_query = true;
+        dest[pos++] = *src++;
       } else {
-	dest[pos++] = ' ';
-	++src;
+        dest[pos++] = ' ';
+        ++src;
       }
     } else {
       src++;
@@ -727,7 +736,7 @@ bool url_decode(string& src_str, string& dest_str)
 static void escape_char(char c, string& dst)
 {
   char buf[16];
-  snprintf(buf, sizeof(buf), "%%%.2X", (unsigned int)c);
+  snprintf(buf, sizeof(buf), "%%%.2X", (int)(unsigned char)c);
   dst.append(buf);
 }
 
@@ -789,7 +798,7 @@ string rgw_trim_whitespace(const string& src)
   }
 
   int end = src.size() - 1;
-  if (end <= start) {
+  if (end < start) {
     return string();
   }
 

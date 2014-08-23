@@ -8,7 +8,7 @@
 #include <string>
 
 #include <vector>
-#include <tr1/memory>
+#include "include/memory.h"
 #include <boost/scoped_ptr.hpp>
 
 #include "ObjectMap.h"
@@ -16,6 +16,7 @@
 #include "osd/osd_types.h"
 #include "common/Mutex.h"
 #include "common/Cond.h"
+#include "common/simple_cache.hpp"
 
 /**
  * DBObjectMap: Implements ObjectMap in terms of KeyValueDB
@@ -68,8 +69,9 @@ public:
   set<uint64_t> in_use;
   set<ghobject_t> map_header_in_use;
 
-  DBObjectMap(KeyValueDB *db) : db(db),
-				header_lock("DBOBjectMap")
+  DBObjectMap(KeyValueDB *db) : db(db), header_lock("DBOBjectMap"),
+                                cache_lock("DBObjectMap::CacheLock"),
+                                caches(g_conf->filestore_omap_header_cache_size)
     {}
 
   int set_keys(
@@ -90,6 +92,11 @@ public:
     );
 
   int clear(
+    const ghobject_t &oid,
+    const SequencerPosition *spos=0
+    );
+
+  int clear_keys_header(
     const ghobject_t &oid,
     const SequencerPosition *spos=0
     );
@@ -275,7 +282,9 @@ public:
 				   coll_t *c, ghobject_t *oid);
 private:
   /// Implicit lock on Header->seq
-  typedef std::tr1::shared_ptr<_Header> Header;
+  typedef ceph::shared_ptr<_Header> Header;
+  Mutex cache_lock;
+  SimpleLRU<ghobject_t, _Header> caches;
 
   string map_header_key(const ghobject_t &oid);
   string header_key(uint64_t seq);
@@ -311,12 +320,12 @@ private:
     Header header;
 
     /// parent_iter == NULL iff no parent
-    std::tr1::shared_ptr<DBObjectMapIteratorImpl> parent_iter;
+    ceph::shared_ptr<DBObjectMapIteratorImpl> parent_iter;
     KeyValueDB::Iterator key_iter;
     KeyValueDB::Iterator complete_iter;
 
     /// cur_iter points to currently valid iterator
-    std::tr1::shared_ptr<ObjectMapIteratorImpl> cur_iter;
+    ceph::shared_ptr<ObjectMapIteratorImpl> cur_iter;
     int r;
 
     /// init() called, key_iter, complete_iter, parent_iter filled in
@@ -355,7 +364,7 @@ private:
     int adjust();
   };
 
-  typedef std::tr1::shared_ptr<DBObjectMapIteratorImpl> DBObjectMapIterator;
+  typedef ceph::shared_ptr<DBObjectMapIteratorImpl> DBObjectMapIterator;
   DBObjectMapIterator _get_iterator(Header header) {
     return DBObjectMapIterator(new DBObjectMapIteratorImpl(this, header));
   }

@@ -14,6 +14,7 @@
 #include <cctype>
 
 #include <typeinfo>
+#include "common/errno.h"
 
 // -------------
 
@@ -188,6 +189,8 @@ int CrushCompiler::decompile(ostream &out)
     out << "tunable choose_total_tries " << crush.get_choose_total_tries() << "\n";
   if (crush.get_chooseleaf_descend_once() != 0)
     out << "tunable chooseleaf_descend_once " << crush.get_chooseleaf_descend_once() << "\n";
+  if (crush.get_chooseleaf_vary_r() != 0)
+    out << "tunable chooseleaf_vary_r " << crush.get_chooseleaf_vary_r() << "\n";
 
   out << "\n# devices\n";
   for (int i=0; i<crush.get_max_devices(); i++) {
@@ -227,11 +230,8 @@ int CrushCompiler::decompile(ostream &out)
     out << "\truleset " << crush.get_rule_mask_ruleset(i) << "\n";
 
     switch (crush.get_rule_mask_type(i)) {
-    case CEPH_PG_TYPE_REP:
+    case CEPH_PG_TYPE_REPLICATED:
       out << "\ttype replicated\n";
-      break;
-    case CEPH_PG_TYPE_RAID4:
-      out << "\ttype raid4\n";
       break;
     case CEPH_PG_TYPE_ERASURE:
       out << "\ttype erasure\n";
@@ -270,6 +270,10 @@ int CrushCompiler::decompile(ostream &out)
 	break;
       case CRUSH_RULE_SET_CHOOSELEAF_TRIES:
 	out << "\tstep set_chooseleaf_tries " << crush.get_rule_arg1(i, j)
+	    << "\n";
+	break;
+      case CRUSH_RULE_SET_CHOOSELEAF_VARY_R:
+	out << "\tstep set_chooseleaf_vary_r " << crush.get_rule_arg1(i, j)
 	    << "\n";
 	break;
       case CRUSH_RULE_CHOOSE_FIRSTN:
@@ -362,6 +366,8 @@ int CrushCompiler::parse_tunable(iter_t const& i)
     crush.set_choose_total_tries(val);
   else if (name == "chooseleaf_descend_once")
     crush.set_chooseleaf_descend_once(val);
+  else if (name == "chooseleaf_vary_r")
+    crush.set_chooseleaf_vary_r(val);
   else {
     err << "tunable " << name << " not recognized" << std::endl;
     return -1;
@@ -369,7 +375,7 @@ int CrushCompiler::parse_tunable(iter_t const& i)
 
   /*
 
-    current crop of tunables are all now "safe".  reenable this when we
+    current crop of tunables are all now "safe".  re-enable this when we
     add new ones that are ... new.
 
   if (!unsafe_tunables) {
@@ -558,7 +564,7 @@ int CrushCompiler::parse_bucket(iter_t const& i)
     if (r == -EEXIST)
       err << "Duplicate bucket id " << id << std::endl;
     else
-      err << "add_bucket failed " << strerror(-r) << std::endl;
+      err << "add_bucket failed " << cpp_strerror(r) << std::endl;
     return r;
   }
   r = crush.set_item_name(id, name.c_str());
@@ -586,9 +592,7 @@ int CrushCompiler::parse_rule(iter_t const& i)
   string tname = string_node(i->children[start+2]);
   int type;
   if (tname == "replicated")
-    type = CEPH_PG_TYPE_REP;
-  else if (tname == "raid4")
-    type = CEPH_PG_TYPE_RAID4;
+    type = CEPH_PG_TYPE_REPLICATED;
   else if (tname == "erasure")
     type = CEPH_PG_TYPE_ERASURE;
   else 
@@ -647,6 +651,13 @@ int CrushCompiler::parse_rule(iter_t const& i)
       {
 	int val = int_node(s->children[1]);
 	crush.set_rule_step_set_chooseleaf_tries(ruleno, step++, val);
+      }
+      break;
+
+    case crush_grammar::_step_set_chooseleaf_vary_r:
+      {
+	int val = int_node(s->children[1]);
+	crush.set_rule_step_set_chooseleaf_vary_r(ruleno, step++, val);
       }
       break;
 

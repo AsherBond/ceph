@@ -18,6 +18,10 @@ reflect either technical terms or legacy ways of referring to Ceph systems.
 		The aggregate term for the people, software, mission and infrastructure 
 		of Ceph.
 		
+	cephx
+		The Ceph authentication protocol. Cephx operates like Kerberos, but it
+		has no single point of failure.
+
 	Ceph
 	Ceph Platform
 		All Ceph software, which includes any piece of code hosted at 
@@ -36,6 +40,7 @@ reflect either technical terms or legacy ways of referring to Ceph systems.
 	Ceph Object Store
 	RADOS
 	RADOS Cluster
+	Reliable Autonomic Distributed Object Store
 		The core set of storage software which stores the user's data (MON+OSD).
 
 	Ceph Cluster Map
@@ -73,14 +78,17 @@ reflect either technical terms or legacy ways of referring to Ceph systems.
 
 	Object Storage Device
 	OSD
-		A physical or logical storage unit (*e.g.*, LUN). Ceph users often 
-		conflate the term OSD with "Ceph OSD Daemon."
+		A physical or logical storage unit (*e.g.*, LUN).
+		Sometimes, Ceph users use the
+		term "OSD" to refer to :term:`Ceph OSD Daemon`, though the
+		proper term is "Ceph OSD".
 		
 	Ceph OSD Daemon
-	OSD
 	Ceph OSD
-		The Ceph OSD software, which interacts with a logical disk (OSD). Ceph 
-		users often frequently conflate the term OSD with "Ceph OSD Daemon."
+		The Ceph OSD software, which interacts with a logical
+		disk (:term:`OSD`). Sometimes, Ceph users use the
+		term "OSD" to refer to "Ceph OSD Daemon", though the
+		proper term is "Ceph OSD".
 		
 	Ceph Monitor
 	MON
@@ -93,8 +101,8 @@ reflect either technical terms or legacy ways of referring to Ceph systems.
 	Ceph Clients
 	Ceph Client
 		The collection of Ceph components which can access a Ceph Storage 
-		Cluster. These include the Ceph Object Gateway, the Ceph Black Device, 
-		the Ceph Filesystem,	and their corresponding libraries, kernel modules, 
+		Cluster. These include the Ceph Object Gateway, the Ceph Block Device, 
+		the Ceph Filesystem, and their corresponding libraries, kernel modules, 
 		and FUSEs.
 
 	Ceph Kernel Modules
@@ -130,6 +138,13 @@ reflect either technical terms or legacy ways of referring to Ceph systems.
 	CRUSH
 		Controlled Replication Under Scalable Hashing. It is the algorithm
 		Ceph uses to compute object storage locations.
+		
+	ruleset
+		A set of CRUSH data placement rules that applies to a particular pool(s).
+
+	Pool
+	Pools
+		Pools are logical partitions for storing objects.
 
 .. _http://github.com/ceph: http://github.com/ceph
 .. _Cluster Map: ../architecture#cluster-map

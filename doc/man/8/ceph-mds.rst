@@ -56,11 +56,18 @@ Options
    Connect to specified monitor (instead of looking through
    ``ceph.conf``).
 
+.. option:: --journal-check <rank>
+
+    Attempt to replay the journal for MDS <rank>, then exit.
+
+.. option:: --hot-standby <rank>
+
+    Start as a hot standby for MDS <rank>.
 
 Availability
 ============
 
-**ceph-mon** is part of the Ceph distributed storage system. Please refer to the Ceph documentation at
+**ceph-mds** is part of the Ceph distributed storage system. Please refer to the Ceph documentation at
 http://ceph.com/docs for more information.
 
 

@@ -26,11 +26,14 @@ private:
   bool m_filestore_fsync_flushes_journal_data;
 public:
   GenericFileStoreBackend(FileStore *fs);
-  virtual ~GenericFileStoreBackend() {};
+  virtual ~GenericFileStoreBackend() {}
 
+  virtual const char *get_name() {
+    return "generic";
+  }
   virtual int detect_features();
   virtual int create_current();
-  virtual bool can_checkpoint() { return false; };
+  virtual bool can_checkpoint() { return false; }
   virtual int list_checkpoints(list<string>& ls) { return 0; }
   virtual int create_checkpoint(const string& name, uint64_t *cid) { return -EOPNOTSUPP; }
   virtual int sync_checkpoint(uint64_t id) { return -EOPNOTSUPP; }
@@ -42,6 +45,7 @@ public:
   virtual int clone_range(int from, int to, uint64_t srcoff, uint64_t len, uint64_t dstoff) {
     return _copy_range(from, to, srcoff, len, dstoff);
   }
+  virtual int set_alloc_hint(int fd, uint64_t hint) { return -EOPNOTSUPP; }
 
 private:
   int _crc_load_or_init(int fd, SloppyCRCMap *cm);

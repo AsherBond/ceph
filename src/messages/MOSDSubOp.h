@@ -25,7 +25,7 @@
 
 class MOSDSubOp : public Message {
 
-  static const int HEAD_VERSION = 8;
+  static const int HEAD_VERSION = 11;
   static const int COMPAT_VERSION = 1;
 
 public:
@@ -35,7 +35,8 @@ public:
   osd_reqid_t reqid;
   
   // subop
-  pg_t pgid;
+  pg_shard_t from;
+  spg_t pgid;
   hobject_t poid;
   object_locator_t oloc;
   
@@ -62,9 +63,11 @@ public:
 
   // piggybacked osd/og state
   eversion_t pg_trim_to;   // primary->replica: trim to here
+  eversion_t pg_trim_rollback_to;   // primary->replica: trim rollback
+                                    // info to here
   osd_peer_stat_t peer_stat;
 
-  map<string,bufferptr> attrset;
+  map<string,bufferlist> attrset;
 
   interval_set<uint64_t> data_subset;
   map<hobject_t, interval_set<uint64_t> > clone_subsets;
@@ -89,6 +92,9 @@ public:
   hobject_t new_temp_oid;      ///< new temp object that we must now start tracking
   hobject_t discard_temp_oid;  ///< previously used temp object that we can now stop tracking
 
+  /// non-empty if this transaction involves a hit_set history update
+  boost::optional<pg_hit_set_history_t> updated_hit_set_history;
+
   int get_cost() const {
     if (ops.size() == 1 && ops[0].op.op == CEPH_OSD_OP_PULL)
       return ops[0].op.extent.length;
@@ -100,7 +106,7 @@ public:
     bufferlist::iterator p = payload.begin();
     ::decode(map_epoch, p);
     ::decode(reqid, p);
-    ::decode(pgid, p);
+    ::decode(pgid.pgid, p);
     ::decode(poid, p);
 
     __u32 num_ops;
@@ -149,7 +155,7 @@ public:
 
     if (header.version < 7) {
       // Handle hobject_t format change
-      if (poid.pool == -1)
+      if (!poid.is_max() && poid.pool == -1)
 	poid.pool = pgid.pool();
       hobject_incorrect_pool = true;
     }
@@ -158,12 +164,30 @@ public:
       ::decode(new_temp_oid, p);
       ::decode(discard_temp_oid, p);
     }
+
+    if (header.version >= 9) {
+      ::decode(from, p);
+      ::decode(pgid.shard, p);
+    } else {
+      from = pg_shard_t(
+	get_source().num(),
+	shard_id_t::NO_SHARD);
+      pgid.shard = shard_id_t::NO_SHARD;
+    }
+    if (header.version >= 10) {
+      ::decode(updated_hit_set_history, p);
+    }
+    if (header.version >= 11) {
+      ::decode(pg_trim_rollback_to, p);
+    } else {
+      pg_trim_rollback_to = pg_trim_to;
+    }
   }
 
   virtual void encode_payload(uint64_t features) {
     ::encode(map_epoch, payload);
     ::encode(reqid, payload);
-    ::encode(pgid, payload);
+    ::encode(pgid.pgid, payload);
     ::encode(poid, payload);
 
     __u32 num_ops = ops.size();
@@ -204,15 +228,21 @@ public:
     ::encode(omap_header, payload);
     ::encode(new_temp_oid, payload);
     ::encode(discard_temp_oid, payload);
+    ::encode(from, payload);
+    ::encode(pgid.shard, payload);
+    ::encode(updated_hit_set_history, payload);
+    ::encode(pg_trim_rollback_to, payload);
   }
 
   MOSDSubOp()
     : Message(MSG_OSD_SUBOP, HEAD_VERSION, COMPAT_VERSION) { }
-  MOSDSubOp(osd_reqid_t r, pg_t p, const hobject_t& po, bool noop_, int aw,
-	    epoch_t mape, tid_t rtid, eversion_t v)
+  MOSDSubOp(osd_reqid_t r, pg_shard_t from,
+	    spg_t p, const hobject_t& po, bool noop_, int aw,
+	    epoch_t mape, ceph_tid_t rtid, eversion_t v)
     : Message(MSG_OSD_SUBOP, HEAD_VERSION, COMPAT_VERSION),
       map_epoch(mape),
       reqid(r),
+      from(from),
       pgid(p),
       poid(po),
       acks_wanted(aw),
@@ -243,6 +273,8 @@ public:
     out << " v " << version
 	<< " snapset=" << snapset << " snapc=" << snapc;    
     if (!data_subset.empty()) out << " subset " << data_subset;
+    if (updated_hit_set_history)
+      out << ", has_updated_hit_set_history";
     out << ")";
   }
 };

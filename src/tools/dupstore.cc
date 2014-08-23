@@ -11,14 +11,10 @@
  * Foundation.  See file COPYING.
  * 
  */
-
-#include <iostream>
-#include "os/FileStore.h"
 #include "common/ceph_argparse.h"
 #include "global/global_init.h"
-
-#include <ext/hash_map>
-using __gnu_cxx::hash_map;
+#include "include/unordered_map.h"
+#include "os/FileStore.h"
 
 int dupstore(ObjectStore* src, ObjectStore* dst)
 {
@@ -27,7 +23,7 @@ int dupstore(ObjectStore* src, ObjectStore* dst)
   if (dst->mount() < 0) return 1;
 
   // objects
-  hash_map<ghobject_t, coll_t> did_object;
+  ceph::unordered_map<ghobject_t, coll_t> did_object;
 
   // collections
   vector<coll_t> collections;

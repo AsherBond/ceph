@@ -33,7 +33,7 @@ def test_rados_init():
 
 def test_ioctx_context_manager():
     with Rados(conffile='', rados_id='admin') as conn:
-        with conn.open_ioctx('data') as ioctx:
+        with conn.open_ioctx('rbd') as ioctx:
             pass
 
 class TestRados(object):
@@ -43,6 +43,9 @@ class TestRados(object):
         self.rados.conf_parse_env('FOO_DOES_NOT_EXIST_BLAHBLAH')
         self.rados.conf_parse_env()
         self.rados.connect()
+
+        # Assume any pre-existing pools are the cluster's defaults
+        self.default_pools = self.rados.list_pools()
 
     def tearDown(self):
         self.rados.shutdown()
@@ -63,9 +66,8 @@ class TestRados(object):
 
     def list_non_default_pools(self):
         pools = self.rados.list_pools()
-        pools.remove('data')
-        pools.remove('metadata')
-        pools.remove('rbd')
+        for p in self.default_pools:
+            pools.remove(p)
         return set(pools)
 
     def test_list_pools(self):
@@ -118,6 +120,12 @@ class TestIoctx(object):
         self.ioctx.write_full('abc', 'd')
         eq(self.ioctx.read('abc'), 'd')
 
+    def test_append(self):
+        self.ioctx.write('abc', 'a')
+        self.ioctx.append('abc', 'b')
+        self.ioctx.append('abc', 'c')
+        eq(self.ioctx.read('abc'), 'abc')
+
     def test_write_zeros(self):
         self.ioctx.write('abc', 'a\0b\0c')
         eq(self.ioctx.read('abc'), 'a\0b\0c')
@@ -136,8 +144,9 @@ class TestIoctx(object):
         self.ioctx.write('a', '')
         self.ioctx.write('b', 'foo')
         self.ioctx.write_full('c', 'bar')
+        self.ioctx.append('d', 'jazz')
         object_names = [obj.key for obj in self.ioctx.list_objects()]
-        eq(sorted(object_names), ['a', 'b', 'c'])
+        eq(sorted(object_names), ['a', 'b', 'c', 'd'])
 
     def test_xattrs(self):
         xattrs = dict(a='1', b='2', c='3', d='a\0b', e='\0')
@@ -249,6 +258,7 @@ class TestIoctx(object):
             while count[0] < 4:
                 lock.wait()
         eq(comp.get_return_value(), 0)
+        eq(comp2.get_return_value(), 0)
         [i.remove() for i in self.ioctx.list_objects()]
 
     def test_aio_write_full(self):

@@ -475,16 +475,16 @@ namespace librbd {
 			      snapid_t oursnap_id)
   {
     if (pspec.pool_id != -1) {
-      map<string, SnapInfo>::iterator it;
-      for (it = ictx->snaps_by_name.begin();
-	   it != ictx->snaps_by_name.end(); ++it) {
+      map<snap_t, SnapInfo>::iterator it;
+      for (it = ictx->snap_info.begin();
+	   it != ictx->snap_info.end(); ++it) {
 	// skip our snap id (if checking base image, CEPH_NOSNAP won't match)
-	if (it->second.id == oursnap_id)
+	if (it->first == oursnap_id)
 	  continue;
 	if (it->second.parent.spec == pspec)
 	  break;
       }
-      if (it == ictx->snaps_by_name.end())
+      if (it == ictx->snap_info.end())
 	return -ENOENT;
     }
     return 0;
@@ -569,7 +569,7 @@ namespace librbd {
       return -ENOENT;
 
     bool is_protected;
-    r = ictx->is_snap_protected(snap_name, &is_protected);
+    r = ictx->is_snap_protected(snap_id, &is_protected);
     if (r < 0)
       return r;
 
@@ -612,12 +612,15 @@ namespace librbd {
       return -ENOENT;
 
     bool is_unprotected;
-    r = ictx->is_snap_unprotected(snap_name, &is_unprotected);
+    r = ictx->is_snap_unprotected(snap_id, &is_unprotected);
     if (r < 0)
       return r;
 
-    if (is_unprotected)
+    if (is_unprotected) {
+      lderr(ictx->cct) << "snap_unprotect: snapshot is already unprotected"
+		       << dendl;
       return -EINVAL;
+    }
 
     r = cls_client::set_protection_status(&ictx->md_ctx,
 					  ictx->header_oid,
@@ -661,6 +664,11 @@ namespace librbd {
 					  ictx->header_oid,
 					  snap_id,
 					  RBD_PROTECTION_STATUS_UNPROTECTED);
+    if (r < 0) {
+      lderr(ictx->cct) << "snap_unprotect: error setting unprotected status"
+		       << dendl;
+      goto reprotect_and_return_err;
+    }
     notify_change(ictx->md_ctx, ictx->header_oid, NULL, ictx);
     return 0;
 
@@ -687,8 +695,11 @@ reprotect_and_return_err:
       return r;
 
     RWLock::RLocker l(ictx->snap_lock);
+    snap_t snap_id = ictx->get_snap_id(snap_name);
+    if (snap_id == CEPH_NOSNAP)
+      return -ENOENT;
     bool is_unprotected;
-    r = ictx->is_snap_unprotected(snap_name, &is_unprotected);
+    r = ictx->is_snap_unprotected(snap_id, &is_unprotected);
     // consider both PROTECTED or UNPROTECTING to be 'protected',
     // since in either state they can't be deleted
     *is_protected = !is_unprotected;
@@ -829,6 +840,9 @@ reprotect_and_return_err:
 	     bool old_format, uint64_t features, int *order,
 	     uint64_t stripe_unit, uint64_t stripe_count)
   {
+    if (!order)
+      return -EINVAL;
+
     CephContext *cct = (CephContext *)io_ctx.cct();
     ldout(cct, 20) << "create " << &io_ctx << " name = " << imgname
 		   << " size = " << size << " old_format = " << old_format
@@ -853,9 +867,6 @@ reprotect_and_return_err:
       lderr(cct) << "rbd image " << imgname << " already exists" << dendl;
       return -EEXIST;
     }
-
-    if (!order)
-      return -EINVAL;
 
     if (!*order)
       *order = cct->_conf->rbd_default_order;
@@ -967,7 +978,7 @@ reprotect_and_return_err:
     p_imctx->snap_lock.get_read();
     p_imctx->get_features(p_imctx->snap_id, &p_features);
     size = p_imctx->get_image_size(p_imctx->snap_id);
-    p_imctx->is_snap_protected(p_imctx->snap_name, &snap_protected);
+    p_imctx->is_snap_protected(p_imctx->snap_id, &snap_protected);
     p_imctx->snap_lock.put_read();
     p_imctx->md_lock.put_read();
 
@@ -1019,7 +1030,7 @@ reprotect_and_return_err:
 
     if (r == 0) {
       p_imctx->snap_lock.get_read();
-      r = p_imctx->is_snap_protected(p_imctx->snap_name, &snap_protected);
+      r = p_imctx->is_snap_protected(p_imctx->snap_id, &snap_protected);
       p_imctx->snap_lock.put_read();
     }
     if (r < 0 || !snap_protected) {
@@ -1246,6 +1257,13 @@ reprotect_and_return_err:
     // since we don't know the image and snapshot name, set their ids and
     // reset the snap_name and snap_exists fields after we read the header
     ictx->parent = new ImageCtx("", parent_image_id, NULL, p_ioctx, true);
+
+    // set rados flags for reading the parent image
+    if (ictx->cct->_conf->rbd_balance_parent_reads)
+      ictx->parent->set_read_flag(librados::OPERATION_BALANCE_READS);
+    else if (ictx->cct->_conf->rbd_localize_parent_reads)
+      ictx->parent->set_read_flag(librados::OPERATION_LOCALIZE_READS);
+
     r = open_image(ictx->parent);
     if (r < 0) {
       lderr(ictx->cct) << "error opening parent image: " << cpp_strerror(r)
@@ -1265,6 +1283,19 @@ reprotect_and_return_err:
       return r;
     }
     ictx->parent->snap_set(ictx->parent->snap_name);
+    ictx->parent->parent_lock.get_write();
+    r = refresh_parent(ictx->parent);
+    if (r < 0) {
+      lderr(ictx->cct) << "error refreshing parent snapshot "
+		       << ictx->parent->id << " "
+		       << ictx->parent->snap_name << dendl;
+      ictx->parent->parent_lock.put_write();
+      ictx->parent->snap_lock.put_write();
+      close_image(ictx->parent);
+      ictx->parent = NULL;
+      return r;
+    }
+    ictx->parent->parent_lock.put_write();
     ictx->parent->snap_lock.put_write();
 
     return 0;
@@ -1343,15 +1374,31 @@ reprotect_and_return_err:
     if (r < 0) {
       ldout(cct, 2) << "error opening image: " << cpp_strerror(-r) << dendl;
     } else {
+      string header_oid = ictx->header_oid;
+      old_format = ictx->old_format;
+      unknown_format = false;
+      id = ictx->id;
+
       if (ictx->snaps.size()) {
 	lderr(cct) << "image has snapshots - not removing" << dendl;
 	close_image(ictx);
 	return -ENOTEMPTY;
       }
-      string header_oid = ictx->header_oid;
-      old_format = ictx->old_format;
-      unknown_format = false;
-      id = ictx->id;
+
+      std::list<obj_watch_t> watchers;
+      r = io_ctx.list_watchers(header_oid, &watchers);
+      if (r < 0) {
+        lderr(cct) << "error listing watchers" << dendl;
+        close_image(ictx);
+        return r;
+      }
+      if (watchers.size() > 1) {
+        lderr(cct) << "image has watchers - not removing" << dendl;
+        close_image(ictx);
+        return -EBUSY;
+      }
+      assert(watchers.size() == 1);
+
       ictx->md_lock.get_read();
       trim_image(ictx, 0, prog_ctx);
       ictx->md_lock.put_read();
@@ -1365,6 +1412,7 @@ reprotect_and_return_err:
 				   parent_info.spec, id);
       if (r < 0 && r != -ENOENT) {
 	lderr(cct) << "error removing child from children list" << dendl;
+        close_image(ictx);
 	return r;
       }
       close_image(ictx);
@@ -1466,18 +1514,23 @@ reprotect_and_return_err:
     ldout(cct, 20) << "resize " << ictx << " " << ictx->size << " -> "
 		   << size << dendl;
 
-    if (ictx->read_only)
+    if (ictx->read_only) {
       return -EROFS;
+    }
 
     int r = ictx_check(ictx);
-    if (r < 0)
+    if (r < 0) {
       return r;
+    }
 
     RWLock::WLocker l(ictx->md_lock);
     if (size < ictx->size && ictx->object_cacher) {
       // need to invalidate since we're deleting objects, and
       // ObjectCacher doesn't track non-existent objects
-      ictx->invalidate_cache();
+      r = ictx->invalidate_cache();
+      if (r < 0) {
+	return r;
+      }
     }
     resize_helper(ictx, size, prog_ctx);
 
@@ -1497,11 +1550,11 @@ reprotect_and_return_err:
     bufferlist bl, bl2;
 
     RWLock::RLocker l(ictx->snap_lock);
-    for (map<string, SnapInfo>::iterator it = ictx->snaps_by_name.begin();
-	 it != ictx->snaps_by_name.end(); ++it) {
+    for (map<snap_t, SnapInfo>::iterator it = ictx->snap_info.begin();
+	 it != ictx->snap_info.end(); ++it) {
       snap_info_t info;
-      info.name = it->first;
-      info.id = it->second.id;
+      info.name = it->second.name;
+      info.id = it->first;
       info.size = it->second.size;
       snaps.push_back(info);
     }
@@ -1518,7 +1571,7 @@ reprotect_and_return_err:
       return r;
 
     RWLock::RLocker l(ictx->snap_lock);
-    return ictx->snaps_by_name.count(snap_name);
+    return ictx->get_snap_id(snap_name) != CEPH_NOSNAP;
   }
 
 
@@ -1741,7 +1794,8 @@ reprotect_and_return_err:
 	}
 
 	ictx->snaps.clear();
-	ictx->snaps_by_name.clear();
+	ictx->snap_info.clear();
+	ictx->snap_ids.clear();
 	for (size_t i = 0; i < new_snapc.snaps.size(); ++i) {
 	  uint64_t features = ictx->old_format ? 0 : snap_features[i];
 	  uint8_t protection_status = ictx->old_format ?
@@ -1820,7 +1874,9 @@ reprotect_and_return_err:
     // need to flush any pending writes before resizing and rolling back -
     // writes might create new snapshots. Rolling back will replace
     // the current version, so we have to invalidate that too.
-    ictx->invalidate_cache();
+    r = ictx->invalidate_cache();
+    if (r < 0)
+      return r;
 
     ldout(cct, 2) << "resizing to snapshot size..." << dendl;
     NoOpProgressContext no_op;
@@ -1928,6 +1984,13 @@ reprotect_and_return_err:
 	return;
       }
       assert(m_bl->length() == (size_t)r);
+
+      if (m_bl->is_zero()) {
+	delete m_bl;
+	m_throttle->end_op(r);
+	return;
+      }
+
       Context *ctx = new C_CopyWrite(m_throttle, m_bl);
       AioCompletion *comp = aio_create_completion_internal(ctx, rbd_ctx_cb);
       r = aio_write(m_dest, m_offset, m_bl->length(), m_bl->c_str(), comp);
@@ -2037,7 +2100,7 @@ reprotect_and_return_err:
 			 << ictx->snap_name << "'" << dendl;
     int r = ictx->init();
     if (r < 0)
-      return r;
+      goto err_close;
 
     if (!ictx->read_only) {
       r = ictx->register_watch();
@@ -2617,8 +2680,9 @@ reprotect_and_return_err:
 
     uint64_t mylen = len;
     int r = clip_io(ictx, off, &mylen);
-    if (r < 0)
+    if (r < 0) {
       return r;
+    }
 
     Context *ctx = new C_SafeCond(&mylock, &cond, &done, &ret);
     AioCompletion *c = aio_create_completion_internal(ctx, rbd_ctx_cb);
@@ -2634,8 +2698,9 @@ reprotect_and_return_err:
       cond.Wait(mylock);
     mylock.Unlock();
 
-    if (ret < 0)
+    if (ret < 0) {
       return ret;
+    }
 
     elapsed = ceph_clock_now(ictx->cct) - start_time;
     ictx->perfcounter->tinc(l_librbd_wr_latency, elapsed);
@@ -2670,8 +2735,9 @@ reprotect_and_return_err:
       cond.Wait(mylock);
     mylock.Unlock();
 
-    if (ret < 0)
+    if (ret < 0) {
       return ret;
+    }
 
     elapsed = ceph_clock_now(ictx->cct) - start_time;
     ictx->perfcounter->inc(l_librbd_discard_latency, elapsed);
@@ -2787,8 +2853,9 @@ reprotect_and_return_err:
     ldout(cct, 20) << "aio_flush " << ictx << " completion " << c <<  dendl;
 
     int r = ictx_check(ictx);
-    if (r < 0)
+    if (r < 0) {
       return r;
+    }
 
     ictx->user_flushed();
 
@@ -2817,8 +2884,9 @@ reprotect_and_return_err:
     ldout(cct, 20) << "flush " << ictx << dendl;
 
     int r = ictx_check(ictx);
-    if (r < 0)
+    if (r < 0) {
       return r;
+    }
 
     ictx->user_flushed();
     r = _flush(ictx);
@@ -2843,6 +2911,21 @@ reprotect_and_return_err:
     return r;
   }
 
+  int invalidate_cache(ImageCtx *ictx)
+  {
+    CephContext *cct = ictx->cct;
+    ldout(cct, 20) << "invalidate_cache " << ictx << dendl;
+
+    int r = ictx_check(ictx);
+    if (r < 0) {
+      return r;
+    }
+
+    RWLock::WLocker l(ictx->md_lock);
+    r = ictx->invalidate_cache();
+    return r;
+  }
+
   int aio_write(ImageCtx *ictx, uint64_t off, size_t len, const char *buf,
 		AioCompletion *c)
   {
@@ -2850,17 +2933,16 @@ reprotect_and_return_err:
     ldout(cct, 20) << "aio_write " << ictx << " off = " << off << " len = "
 		   << len << " buf = " << (void*)buf << dendl;
 
-    if (!len)
-      return 0;
-
     int r = ictx_check(ictx);
-    if (r < 0)
+    if (r < 0) {
       return r;
+    }
 
     uint64_t mylen = len;
     r = clip_io(ictx, off, &mylen);
-    if (r < 0)
+    if (r < 0) {
       return r;
+    }
 
     ictx->snap_lock.get_read();
     snapid_t snap_id = ictx->snap_id;
@@ -2871,21 +2953,24 @@ reprotect_and_return_err:
     ictx->parent_lock.put_read();
     ictx->snap_lock.put_read();
 
-    if (snap_id != CEPH_NOSNAP || ictx->read_only)
+    if (snap_id != CEPH_NOSNAP || ictx->read_only) {
       return -EROFS;
+    }
 
     ldout(cct, 20) << "  parent overlap " << overlap << dendl;
 
     // map
     vector<ObjectExtent> extents;
-    Striper::file_to_extents(ictx->cct, ictx->format_string, &ictx->layout, off, mylen, 0, extents);
+    if (len > 0) {
+      Striper::file_to_extents(ictx->cct, ictx->format_string,
+			       &ictx->layout, off, mylen, 0, extents);
+    }
 
     c->get();
     c->init_time(ictx, AIO_TYPE_WRITE);
     for (vector<ObjectExtent>::iterator p = extents.begin(); p != extents.end(); ++p) {
       ldout(cct, 20) << " oid " << p->oid << " " << p->offset << "~" << p->length
 		     << " from " << p->buffer_extents << dendl;
-
       // assemble extent
       bufferlist bl;
       for (vector<pair<uint64_t,uint64_t> >::iterator q = p->buffer_extents.begin();
@@ -2932,16 +3017,15 @@ reprotect_and_return_err:
     ldout(cct, 20) << "aio_discard " << ictx << " off = " << off << " len = "
 		   << len << dendl;
 
-    if (!len)
-      return 0;
-
     int r = ictx_check(ictx);
-    if (r < 0)
+    if (r < 0) {
       return r;
+    }
 
     r = clip_io(ictx, off, &len);
-    if (r < 0)
+    if (r < 0) {
       return r;
+    }
 
     // TODO: check for snap
     ictx->snap_lock.get_read();
@@ -2953,12 +3037,16 @@ reprotect_and_return_err:
     ictx->parent_lock.put_read();
     ictx->snap_lock.put_read();
 
-    if (snap_id != CEPH_NOSNAP || ictx->read_only)
+    if (snap_id != CEPH_NOSNAP || ictx->read_only) {
       return -EROFS;
+    }
 
     // map
     vector<ObjectExtent> extents;
-    Striper::file_to_extents(ictx->cct, ictx->format_string, &ictx->layout, off, len, 0, extents);
+    if (len > 0) {
+      Striper::file_to_extents(ictx->cct, ictx->format_string,
+			       &ictx->layout, off, len, 0, extents);
+    }
 
     c->get();
     c->init_time(ictx, AIO_TYPE_DISCARD);
@@ -3034,8 +3122,9 @@ reprotect_and_return_err:
     ldout(ictx->cct, 20) << "aio_read " << ictx << " completion " << c << " " << image_extents << dendl;
 
     int r = ictx_check(ictx);
-    if (r < 0)
+    if (r < 0) {
       return r;
+    }
 
     ictx->snap_lock.get_read();
     snap_t snap_id = ictx->snap_id;
@@ -3050,8 +3139,11 @@ reprotect_and_return_err:
 	 ++p) {
       uint64_t len = p->second;
       r = clip_io(ictx, p->first, &len);
-      if (r < 0)
+      if (r < 0) {
 	return r;
+      }
+      if (len == 0)
+	continue;
 
       Striper::file_to_extents(ictx->cct, ictx->format_string, &ictx->layout,
 			       p->first, len, 0, object_extents, buffer_ofs);

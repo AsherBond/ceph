@@ -1,3 +1,6 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+
 #include "common/Clock.h"
 #include "common/Timer.h"
 #include "common/utf8.h"
@@ -166,6 +169,9 @@ void rgw_log_usage_finalize()
 
 static void log_usage(struct req_state *s, const string& op_name)
 {
+  if (s->system_request) /* don't log system user operations */
+    return;
+
   if (!usage_logger)
     return;
 

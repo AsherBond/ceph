@@ -51,7 +51,7 @@
 #include "mon/MonitorDBStore.h"
 
 #include <memory>
-#include <tr1/memory>
+#include "include/memory.h"
 #include <errno.h>
 
 
@@ -66,9 +66,9 @@ enum {
   l_cluster_num_osd_up,
   l_cluster_num_osd_in,
   l_cluster_osd_epoch,
-  l_cluster_osd_kb,
-  l_cluster_osd_kb_used,
-  l_cluster_osd_kb_avail,
+  l_cluster_osd_bytes,
+  l_cluster_osd_bytes_used,
+  l_cluster_osd_bytes_avail,
   l_cluster_num_pool,
   l_cluster_num_pg,
   l_cluster_num_pg_active_clean,
@@ -76,6 +76,7 @@ enum {
   l_cluster_num_pg_peering,
   l_cluster_num_object,
   l_cluster_num_object_degraded,
+  l_cluster_num_object_misplaced,
   l_cluster_num_object_unfound,
   l_cluster_num_bytes,
   l_cluster_num_mds_up,
@@ -83,6 +84,19 @@ enum {
   l_cluster_num_mds_failed,
   l_cluster_mds_epoch,
   l_cluster_last,
+};
+
+enum {
+  l_mon_first = 456000,
+  l_mon_num_sessions,
+  l_mon_session_add,
+  l_mon_session_rm,
+  l_mon_session_trim,
+  l_mon_num_elections,
+  l_mon_election_call,
+  l_mon_election_win,
+  l_mon_election_lose,
+  l_mon_last,
 };
 
 class QuorumService;
@@ -106,7 +120,8 @@ struct MonCommand;
 
 #define COMPAT_SET_LOC "feature_set"
 
-class Monitor : public Dispatcher {
+class Monitor : public Dispatcher,
+                public md_config_obs_t {
 public:
   // me
   string name;
@@ -128,6 +143,7 @@ public:
   void unregister_cluster_logger();
 
   MonMap *monmap;
+  uuid_d fingerprint;
 
   set<entity_addr_t> extra_probe_peers;
 
@@ -190,11 +206,16 @@ public:
 
   const utime_t &get_leader_since() const;
 
+  void prepare_new_fingerprint(MonitorDBStore::Transaction *t);
+
   // -- elector --
 private:
   Paxos *paxos;
   Elector elector;
   friend class Elector;
+
+  /// features we require of peers (based on on-disk compatset)
+  uint64_t required_features;
   
   int leader;            // current leader (to best of knowledge)
   set<int> quorum;       // current active set of monitors (if !starting)
@@ -516,15 +537,20 @@ public:
   epoch_t get_epoch();
   int get_leader() { return leader; }
   const set<int>& get_quorum() { return quorum; }
-  set<string> get_quorum_names() {
-    set<string> q;
+  list<string> get_quorum_names() {
+    list<string> q;
     for (set<int>::iterator p = quorum.begin(); p != quorum.end(); ++p)
-      q.insert(monmap->get_name(*p));
+      q.push_back(monmap->get_name(*p));
     return q;
   }
   uint64_t get_quorum_features() const {
     return quorum_features;
   }
+  uint64_t get_required_features() const {
+    return quorum_features;
+  }
+  void apply_quorum_to_compatset_features();
+  void apply_compatset_features_to_quorum_requirements();
 
 private:
   void _reset();   ///< called from bootstrap, start_, or join_election
@@ -614,10 +640,11 @@ public:
                                            MonCommand *cmds, int cmds_size);
   bool _allowed_command(MonSession *s, string &module, string &prefix,
                         const map<string,cmd_vartype>& cmdmap,
-                        const map<string,string> param_str_map,
+                        const map<string,string>& param_str_map,
                         const MonCommand *this_cmd);
-  void _mon_status(Formatter *f, ostream& ss);
+  void get_mon_status(Formatter *f, ostream& ss);
   void _quorum_status(Formatter *f, ostream& ss);
+  void _osdmonitor_prepare_command(cmdmap_t& cmdmap, ostream& ss);
   void _add_bootstrap_peer_hint(string cmd, cmdmap_t& cmdmap, ostream& ss);
   void handle_command(class MMonCommand *m);
   void handle_route(MRoute *m);
@@ -629,7 +656,7 @@ public:
    * @param detailbl optional bufferlist* to fill with a detailed report
    */
   void get_health(string& status, bufferlist *detailbl, Formatter *f);
-  void get_status(stringstream &ss, Formatter *f);
+  void get_cluster_status(stringstream &ss, Formatter *f);
 
   void reply_command(MMonCommand *m, int rc, const string &rs, version_t version);
   void reply_command(MMonCommand *m, int rc, const string &rs, bufferlist& rdata, version_t version);
@@ -659,8 +686,10 @@ public:
     bufferlist request_bl;
     MonSession *session;
     ConnectionRef con;
+    uint64_t con_features;
     entity_inst_t client_inst;
 
+    RoutedRequest() : tid(0), session(NULL), con_features(0) {}
     ~RoutedRequest() {
       if (session)
 	session->put();
@@ -748,6 +777,8 @@ public:
   // features
   static CompatSet get_supported_features();
   static CompatSet get_legacy_features();
+  /// read the ondisk features into the CompatSet pointed to by read_features
+  static void read_features_off_disk(MonitorDBStore *store, CompatSet *read_features);
   void read_features();
   void write_features(MonitorDBStore::Transaction &t);
 
@@ -758,6 +789,12 @@ public:
 
   static int check_features(MonitorDBStore *store);
 
+  // config observer
+  virtual const char** get_tracked_conf_keys() const;
+  virtual void handle_conf_change(const struct md_config_t *conf,
+                                  const std::set<std::string> &changed);
+
+  int sanitize_options();
   int preinit();
   int init();
   void init_paxos();
@@ -879,11 +916,15 @@ public:
   void get_leader_supported_commands(const MonCommand **cmds, int *count);
   /// the Monitor owns this pointer once you pass it in
   void set_leader_supported_commands(const MonCommand *cmds, int size);
+  static bool is_keyring_required();
 };
 
 #define CEPH_MON_FEATURE_INCOMPAT_BASE CompatSet::Feature (1, "initial feature set (~v.18)")
 #define CEPH_MON_FEATURE_INCOMPAT_GV CompatSet::Feature (2, "global version sequencing (v0.52)")
 #define CEPH_MON_FEATURE_INCOMPAT_SINGLE_PAXOS CompatSet::Feature (3, "single paxos with k/v store (v0.\?)")
+#define CEPH_MON_FEATURE_INCOMPAT_OSD_ERASURE_CODES CompatSet::Feature(4, "support erasure code pools")
+#define CEPH_MON_FEATURE_INCOMPAT_OSDMAP_ENC CompatSet::Feature(5, "new-style osdmap encoding")
+// make sure you add your feature to Monitor::get_supported_features
 
 long parse_pos_long(const char *s, ostream *pss = NULL);
 
@@ -940,6 +981,6 @@ struct MonCommand {
     DECODE_FINISH(bl);
   }
 };
-WRITE_CLASS_ENCODER(MonCommand);
+WRITE_CLASS_ENCODER(MonCommand)
 
 #endif

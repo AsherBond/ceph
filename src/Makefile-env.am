@@ -54,7 +54,9 @@ AM_COMMON_CPPFLAGS = \
 	-D_THREAD_SAFE \
 	-D__STDC_FORMAT_MACROS \
 	-D_GNU_SOURCE \
-	-DCEPH_LIBDIR=\"${libdir}\"
+	-DCEPH_LIBDIR=\"${libdir}\" \
+	-DCEPH_PKGLIBDIR=\"${pkglibdir}\" \
+	-DGTEST_HAS_TR1_TUPLE=0
 
 AM_COMMON_CFLAGS = \
 	-Wall \
@@ -89,7 +91,10 @@ endif
 # http://www.gentoo.org/proj/en/qa/asneeded.xml
 # http://gcc.gnu.org/ml/gcc-help/2010-12/msg00338.html
 # http://sigquit.wordpress.com/2011/02/16/why-asneeded-doesnt-work-as-expected-for-your-libraries-on-your-autotools-project/
-AM_LDFLAGS = -Wl,--as-needed
+AM_LDFLAGS =
+if LINUX
+AM_LDFLAGS += -Wl,--as-needed
+endif
 
 if USE_BOOST_SPIRIT_OLD_HDR
 AM_CXXFLAGS += -DUSE_BOOST_SPIRIT_OLD_HDR
@@ -111,7 +116,7 @@ AM_CCASFLAGS = -f elf64
 #####################
 ## library definitions and dependencies
 
-EXTRALIBS = -luuid -lm -lkeyutils
+EXTRALIBS = -luuid -lm
 if FREEBSD
 EXTRALIBS += -lexecinfo
 endif # FREEBSD
@@ -126,6 +131,7 @@ endif # PROFILER
 
 LIBGLOBAL = libglobal.la
 LIBCOMMON = libcommon.la
+LIBSECRET = libsecret.la
 LIBARCH = libarch.la
 LIBPERFGLUE = libperfglue.la
 LIBAUTH = libauth.la
@@ -134,16 +140,26 @@ LIBCRUSH = libcrush.la
 LIBJSON_SPIRIT = libjson_spirit.la
 LIBLOG = liblog.la
 LIBOS = libos.la
+LIBOS_TYPES = libos_types.la
 LIBOSD = libosd.la
+LIBOSD_TYPES = libosd_types.la
 LIBOSDC = libosdc.la
 LIBMON = libmon.la
+LIBMON_TYPES = libmon_types.la
 LIBMDS = libmds.la
 LIBCLIENT = libclient.la
 LIBCLIENT_FUSE = libclient_fuse.la
 LIBRADOS = librados.la
+LIBRADOSSTRIPER = libradosstriper.la
 LIBRGW = librgw.la
 LIBRBD = librbd.la
+LIBKRBD = libkrbd.la
 LIBCEPHFS = libcephfs.la
+LIBERASURE_CODE = liberasure_code.la
+LIBOSD_TP = tracing/libosd_tp.la
+LIBRADOS_TP = tracing/librados_tp.la
+LIBRBD_TP = tracing/librbd_tp.la
+LIBOS_TP = tracing/libos_tp.la
 
 if WITH_LIBAIO
 LIBOS += -laio
@@ -152,6 +168,10 @@ endif # WITH_LIBAIO
 if WITH_LIBZFS
 LIBOS += libos_zfs.a -lzfs
 endif # WITH_LIBZFS
+
+if WITH_LIBROCKSDB
+LIBOS += libos_rocksdb.la
+endif # WITH_LIBROCKSDB
 
 if WITH_TCMALLOC
 LIBPERFGLUE += -ltcmalloc
@@ -173,7 +193,7 @@ LIBMDS += $(LIBPERFGLUE)
 LIBOS += -lleveldb -lsnappy
 
 # Use this for binaries requiring libglobal
-CEPH_GLOBAL = $(LIBGLOBAL) $(PTHREAD_LIBS) -lm $(CRYPTO_LIBS) $(EXTRALIBS)
+CEPH_GLOBAL = $(LIBGLOBAL) $(LIBCOMMON) $(PTHREAD_LIBS) -lm $(CRYPTO_LIBS) $(EXTRALIBS)
 
 # This is set by [lib]/Makefile.am and used for build tests
 LIBCOMMON_DEPS =

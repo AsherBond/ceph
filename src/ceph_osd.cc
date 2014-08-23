@@ -48,6 +48,8 @@ using namespace std;
 
 #include "include/assert.h"
 
+#include "erasure-code/ErasureCodePlugin.h"
+
 #define dout_subsys ceph_subsys_osd
 
 OSD *osd = NULL;
@@ -66,13 +68,33 @@ void usage()
   generic_server_usage();
 }
 
+int preload_erasure_code()
+{
+  string directory = g_conf->osd_pool_default_erasure_code_directory;
+  string plugins = g_conf->osd_erasure_code_plugins;
+  stringstream ss;
+  int r = ErasureCodePluginRegistry::instance().preload(plugins,
+							directory,
+							ss);
+  if (r)
+    derr << ss.str() << dendl;
+  else
+    dout(10) << ss.str() << dendl;
+  return r;
+}
+
 int main(int argc, const char **argv) 
 {
   vector<const char*> args;
   argv_to_vec(argc, argv, args);
   env_to_vec(args);
 
-  global_init(NULL, args, CEPH_ENTITY_TYPE_OSD, CODE_ENVIRONMENT_DAEMON, 0);
+  vector<const char*> def_args;
+  // We want to enable leveldb's log, while allowing users to override this
+  // option, therefore we will pass it as a default argument to global_init().
+  def_args.push_back("--leveldb-log=");
+
+  global_init(&def_args, args, CEPH_ENTITY_TYPE_OSD, CODE_ENVIRONMENT_DAEMON, 0);
   ceph_heap_profiler_init();
 
   // osd specific args
@@ -370,7 +392,8 @@ int main(int argc, const char **argv)
     CEPH_FEATURE_UID | 
     CEPH_FEATURE_NOSRCADDR |
     CEPH_FEATURE_PGID64 |
-    CEPH_FEATURE_MSG_AUTH;
+    CEPH_FEATURE_MSG_AUTH |
+    CEPH_FEATURE_OSD_ERASURE_CODES;
 
   ms_public->set_default_policy(Messenger::Policy::stateless_server(supported, 0));
   ms_public->set_policy_throttlers(entity_name_t::TYPE_CLIENT,
@@ -449,6 +472,9 @@ int main(int argc, const char **argv)
   if (mc.build_initial_monmap() < 0)
     return -1;
   global_init_chdir(g_ceph_context);
+
+  if (preload_erasure_code() < -1)
+    return -1;
 
   osd = new OSD(g_ceph_context,
 		store,

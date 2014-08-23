@@ -25,8 +25,9 @@
 
 #define CRUSH_MAGIC 0x00010000ul   /* for detecting algorithm revisions */
 
-
 #define CRUSH_MAX_DEPTH 10  /* max crush hierarchy depth */
+#define CRUSH_MAX_RULESET (1<<8) /*max crush ruleset number*/
+#define CRUSH_MAX_RULES	CRUSH_MAX_RULESET /*max crush rules, shold be the same as max rulesets*/
 
 #define CRUSH_MAX_DEVICE_WEIGHT (100u * 0x10000u)
 #define CRUSH_MAX_BUCKET_WEIGHT (65535u * 0x10000u)
@@ -60,6 +61,7 @@ enum {
 	CRUSH_RULE_SET_CHOOSELEAF_TRIES = 9, /* override chooseleaf_descend_once */
 	CRUSH_RULE_SET_CHOOSE_LOCAL_TRIES = 10,
 	CRUSH_RULE_SET_CHOOSE_LOCAL_FALLBACK_TRIES = 11,
+	CRUSH_RULE_SET_CHOOSELEAF_VARY_R = 12
 };
 
 /*
@@ -193,6 +195,12 @@ struct crush_map {
 	 *    the indep mode.
 	 */
 	__u32 chooseleaf_descend_once;
+
+	/* if non-zero, feed r into chooseleaf, bit-shifted right by (r-1)
+	 * bits.  a value of 1 is best for new clusters.  for legacy clusters
+	 * that want to limit reshuffling, a value of 3 or 4 will make the
+	 * mappings line up a bit better with previous mappings. */
+	__u8 chooseleaf_vary_r;
 
 	__u32 *choose_tries;
 };

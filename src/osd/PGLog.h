@@ -27,6 +27,15 @@ using namespace std;
 
 struct PGLog {
   ////////////////////////////// sub classes //////////////////////////////
+  struct LogEntryHandler {
+    virtual void rollback(
+      const pg_log_entry_t &entry) = 0;
+    virtual void remove(
+      const hobject_t &hoid) = 0;
+    virtual void trim(
+      const pg_log_entry_t &entry) = 0;
+    virtual ~LogEntryHandler() {}
+  };
 
   /* Exceptions */
   class read_log_error : public buffer::error {
@@ -46,18 +55,40 @@ struct PGLog {
    * plus some methods to manipulate it all.
    */
   struct IndexedLog : public pg_log_t {
-    hash_map<hobject_t,pg_log_entry_t*> objects;  // ptrs into log.  be careful!
-    hash_map<osd_reqid_t,pg_log_entry_t*> caller_ops;
+    ceph::unordered_map<hobject_t,pg_log_entry_t*> objects;  // ptrs into log.  be careful!
+    ceph::unordered_map<osd_reqid_t,pg_log_entry_t*> caller_ops;
 
     // recovery pointers
     list<pg_log_entry_t>::iterator complete_to;  // not inclusive of referenced item
     version_t last_requested;           // last object requested by primary
 
-    /****/
-    IndexedLog() : last_requested(0) {}
+    //
+  private:
+    /**
+     * rollback_info_trimmed_to_riter points to the first log entry <=
+     * rollback_info_trimmed_to
+     *
+     * It's a reverse_iterator because rend() is a natural representation for
+     * tail, and rbegin() works nicely for head.
+     */
+    list<pg_log_entry_t>::reverse_iterator rollback_info_trimmed_to_riter;
+  public:
+    void advance_rollback_info_trimmed_to(eversion_t to, LogEntryHandler *h);
 
-    void claim_log(const pg_log_t& o) {
+    /****/
+    IndexedLog() :
+      complete_to(log.end()),
+      last_requested(0),
+      rollback_info_trimmed_to_riter(log.rbegin())
+      {}
+
+    void claim_log_and_clear_rollback_info(const pg_log_t& o) {
+      // we must have already trimmed the old entries
+      assert(rollback_info_trimmed_to == head);
+      assert(rollback_info_trimmed_to_riter == log.rbegin());
+
       log = o.log;
+      rollback_info_trimmed_to = head;
       head = o.head;
       tail = o.tail;
       index();
@@ -69,9 +100,19 @@ struct PGLog {
       IndexedLog *olog);
 
     void zero() {
+      // we must have already trimmed the old entries
+      assert(rollback_info_trimmed_to == head);
+      assert(rollback_info_trimmed_to_riter == log.rbegin());
+
       unindex();
       pg_log_t::clear();
+      rollback_info_trimmed_to_riter = log.rbegin();
       reset_recovery_pointers();
+    }
+    void clear() {
+      rollback_info_trimmed_to = head;
+      rollback_info_trimmed_to_riter = log.rbegin();
+      zero();
     }
     void reset_recovery_pointers() {
       complete_to = log.end();
@@ -85,7 +126,7 @@ struct PGLog {
       return caller_ops.count(r);
     }
     const pg_log_entry_t *get_request(const osd_reqid_t &r) const {
-      hash_map<osd_reqid_t,pg_log_entry_t*>::const_iterator p = caller_ops.find(r);
+      ceph::unordered_map<osd_reqid_t,pg_log_entry_t*>::const_iterator p = caller_ops.find(r);
       if (p == caller_ops.end())
 	return NULL;
       return p->second;
@@ -103,6 +144,11 @@ struct PGLog {
 	  caller_ops[i->reqid] = &(*i);
 	}
       }
+
+      rollback_info_trimmed_to_riter = log.rbegin();
+      while (rollback_info_trimmed_to_riter != log.rend() &&
+	     rollback_info_trimmed_to_riter->version > rollback_info_trimmed_to)
+	rollback_info_trimmed_to_riter++;
     }
 
     void index(pg_log_entry_t& e) {
@@ -132,6 +178,11 @@ struct PGLog {
     void add(pg_log_entry_t& e) {
       // add to log
       log.push_back(e);
+
+      // riter previously pointed to the previous entry
+      if (rollback_info_trimmed_to_riter == log.rbegin())
+	++rollback_info_trimmed_to_riter;
+
       assert(e.version > head);
       assert(head.version == 0 || e.version.version > head.version);
       head = e.version;
@@ -142,7 +193,10 @@ struct PGLog {
 	caller_ops[e.reqid] = &(log.back());
     }
 
-    void trim(eversion_t s, set<eversion_t> *trimmed);
+    void trim(
+      LogEntryHandler *handler,
+      eversion_t s,
+      set<eversion_t> *trimmed);
 
     ostream& print(ostream& out) const;
   };
@@ -271,6 +325,10 @@ public:
     missing.rm(p);
   }
 
+  void missing_add_event(const pg_log_entry_t &e) {
+    missing.add_next_event(e);
+  }
+
   //////////////////// get or set log ////////////////////
 
   const IndexedLog &get_log() const { return log; }
@@ -299,17 +357,43 @@ public:
   void reset_recovery_pointers() { log.reset_recovery_pointers(); }
 
   static void clear_info_log(
-    pg_t pgid,
+    spg_t pgid,
     const hobject_t &infos_oid,
     const hobject_t &log_oid,
     ObjectStore::Transaction *t);
 
-  void trim(eversion_t trim_to, pg_info_t &info);
+  void trim(
+    LogEntryHandler *handler,
+    eversion_t trim_to,
+    pg_info_t &info);
+
+  void trim_rollback_info(
+    eversion_t trim_rollback_to,
+    LogEntryHandler *h) {
+    if (trim_rollback_to > log.can_rollback_to)
+      log.can_rollback_to = trim_rollback_to;
+    log.advance_rollback_info_trimmed_to(
+      trim_rollback_to,
+      h);
+  }
+
+  eversion_t get_rollback_trimmed_to() const {
+    return log.rollback_info_trimmed_to;
+  }
+
+  void clear_can_rollback_to(LogEntryHandler *h) {
+    log.can_rollback_to = log.head;
+    log.advance_rollback_info_trimmed_to(
+      log.head,
+      h);
+  }
 
   //////////////////// get or set log & missing ////////////////////
 
-  void claim_log(const pg_log_t &o) {
-    log.claim_log(o);
+  void claim_log_and_clear_rollback_info(const pg_log_t &o, LogEntryHandler *h) {
+    log.can_rollback_to = log.head;
+    log.advance_rollback_info_trimmed_to(log.head, h);
+    log.claim_log_and_clear_rollback_info(o);
     missing.clear();
     mark_dirty_to(eversion_t::max());
   }
@@ -339,41 +423,125 @@ public:
 	  break;
 	if (info.last_complete < log.complete_to->version)
 	  info.last_complete = log.complete_to->version;
-	log.complete_to++;
+	++log.complete_to;
       }
     }
+
+    if (log.can_rollback_to < v)
+      log.can_rollback_to = v;
   }
 
   void activate_not_complete(pg_info_t &info) {
     log.complete_to = log.log.begin();
     while (log.complete_to->version <
 	   missing.missing[missing.rmissing.begin()->second].need)
-      log.complete_to++;
+      ++log.complete_to;
     assert(log.complete_to != log.log.end());
     if (log.complete_to == log.log.begin()) {
       info.last_complete = eversion_t();
     } else {
-      log.complete_to--;
+      --log.complete_to;
       info.last_complete = log.complete_to->version;
-      log.complete_to++;
+      ++log.complete_to;
     }
     log.last_requested = 0;
   }
 
   void proc_replica_log(ObjectStore::Transaction& t, pg_info_t &oinfo, const pg_log_t &olog,
-			pg_missing_t& omissing, int from) const;
+			pg_missing_t& omissing, pg_shard_t from) const;
 
 protected:
-  bool merge_old_entry(ObjectStore::Transaction& t, const pg_log_entry_t& oe,
-		       const pg_info_t& info, list<hobject_t>& remove_snap);
+  static void split_by_object(
+    list<pg_log_entry_t> &entries,
+    map<hobject_t, list<pg_log_entry_t> > *out_entries) {
+    while (!entries.empty()) {
+      list<pg_log_entry_t> &out_list = (*out_entries)[entries.front().soid];
+      out_list.splice(out_list.end(), entries, entries.begin());
+    }
+  }
+
+  /**
+   * Merge complete list of divergent entries for an object
+   *
+   * @param new_divergent_prior [out] filled out for a new divergent prior
+   */
+  static void _merge_object_divergent_entries(
+    const IndexedLog &log,               ///< [in] log to merge against
+    const hobject_t &hoid,               ///< [in] object we are merging
+    const list<pg_log_entry_t> &entries, ///< [in] entries for hoid to merge
+    const pg_info_t &oinfo,              ///< [in] info for merging entries
+    eversion_t olog_can_rollback_to,     ///< [in] rollback boundary
+    pg_missing_t &omissing,              ///< [in,out] missing to adjust, use
+    boost::optional<pair<eversion_t, hobject_t> > *new_divergent_prior,
+    LogEntryHandler *rollbacker          ///< [in] optional rollbacker object
+    );
+
+  /// Merge all entries using above
+  static void _merge_divergent_entries(
+    const IndexedLog &log,               ///< [in] log to merge against
+    list<pg_log_entry_t> &entries,       ///< [in] entries to merge
+    const pg_info_t &oinfo,              ///< [in] info for merging entries
+    eversion_t olog_can_rollback_to,     ///< [in] rollback boundary
+    pg_missing_t &omissing,              ///< [in,out] missing to adjust, use
+    map<eversion_t, hobject_t> *priors,  ///< [out] target for new priors
+    LogEntryHandler *rollbacker          ///< [in] optional rollbacker object
+    ) {
+    map<hobject_t, list<pg_log_entry_t> > split;
+    split_by_object(entries, &split);
+    for (map<hobject_t, list<pg_log_entry_t> >::iterator i = split.begin();
+	 i != split.end();
+	 ++i) {
+      boost::optional<pair<eversion_t, hobject_t> > new_divergent_prior;
+      _merge_object_divergent_entries(
+	log,
+	i->first,
+	i->second,
+	oinfo,
+	olog_can_rollback_to,
+	omissing,
+	&new_divergent_prior,
+	rollbacker);
+      if (priors && new_divergent_prior) {
+	(*priors)[new_divergent_prior->first] = new_divergent_prior->second;
+      }
+    }
+  }
+
+  /**
+   * Exists for use in TestPGLog for simply testing single divergent log
+   * cases
+   */
+  void merge_old_entry(
+    ObjectStore::Transaction& t,
+    const pg_log_entry_t& oe,
+    const pg_info_t& info,
+    LogEntryHandler *rollbacker) {
+    boost::optional<pair<eversion_t, hobject_t> > new_divergent_prior;
+    list<pg_log_entry_t> entries;
+    entries.push_back(oe);
+    _merge_object_divergent_entries(
+      log,
+      oe.soid,
+      entries,
+      info,
+      log.can_rollback_to,
+      missing,
+      &new_divergent_prior,
+      rollbacker);
+    if (new_divergent_prior)
+      add_divergent_prior(
+	(*new_divergent_prior).first,
+	(*new_divergent_prior).second);
+  }
 public:
   void rewind_divergent_log(ObjectStore::Transaction& t, eversion_t newhead,
-                            pg_info_t &info, list<hobject_t>& remove_snap,
+                            pg_info_t &info, LogEntryHandler *rollbacker,
                             bool &dirty_info, bool &dirty_big_info);
 
-  void merge_log(ObjectStore::Transaction& t, pg_info_t &oinfo, pg_log_t &olog, int from,
-                      pg_info_t &info, list<hobject_t>& remove_snap,
-                      bool &dirty_info, bool &dirty_big_info);
+  void merge_log(ObjectStore::Transaction& t, pg_info_t &oinfo, pg_log_t &olog,
+		 pg_shard_t from,
+		 pg_info_t &info, LogEntryHandler *rollbacker,
+		 bool &dirty_info, bool &dirty_big_info);
 
   void write_log(ObjectStore::Transaction& t, const hobject_t &log_oid);
 

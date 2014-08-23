@@ -15,7 +15,13 @@ rados_include_DATA = \
 	$(srcdir)/include/rados/librados.hpp \
 	$(srcdir)/include/buffer.h \
 	$(srcdir)/include/page.h \
-	$(srcdir)/include/crc32c.h
+	$(srcdir)/include/crc32c.h \
+	$(srcdir)/include/memory.h
+
+radosstriper_includedir = $(includedir)/radosstriper
+radosstriper_include_DATA = \
+	$(srcdir)/include/radosstriper/libradosstriper.h \
+	$(srcdir)/include/radosstriper/libradosstriper.hpp
 
 noinst_HEADERS += \
 	include/Context.h \
@@ -44,11 +50,11 @@ noinst_HEADERS += \
 	include/filepath.h \
 	include/frag.h \
 	include/hash.h \
-	include/histogram.h \
 	include/intarith.h \
 	include/interval_set.h \
 	include/int_types.h \
 	include/ipaddr.h \
+	include/krbd.h \
 	include/linux_fiemap.h \
 	include/lru.h \
 	include/msgr.h \
@@ -59,11 +65,11 @@ noinst_HEADERS += \
 	include/rbd_types.h \
 	include/statlite.h \
 	include/str_list.h \
+	include/str_map.h \
 	include/stringify.h \
 	include/triple.h \
 	include/types.h \
 	include/utime.h \
-	include/dlist.h \
 	include/elist.h \
 	include/uuid.h \
 	include/xlist.h \
@@ -75,8 +81,16 @@ noinst_HEADERS += \
 	include/rados/page.h \
 	include/rados/crc32c.h \
 	include/rados/buffer.h \
+	include/radosstriper/libradosstriper.h \
+	include/radosstriper/libradosstriper.hpp \
 	include/rbd/features.h \
 	include/rbd/librbd.h \
 	include/rbd/librbd.hpp\
 	include/util.h\
-	include/stat.h
+	include/stat.h \
+	include/on_exit.h \
+	include/memory.h \
+	include/rados/memory.h \
+	include/hash_namespace.h \
+	include/unordered_set.h \
+	include/unordered_map.h

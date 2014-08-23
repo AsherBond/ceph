@@ -12,19 +12,11 @@
  *
  */
 
-#include <fcntl.h>
-#include <iostream>
 #include <string>
-#include <sys/stat.h>
-#include <sys/types.h>
 
-#include "mon/AuthMonitor.h"
-#include "common/ConfUtils.h"
-#include "global/global_init.h"
-#include "common/entity_name.h"
 #include "common/ceph_argparse.h"
-#include "common/config.h"
-#include "include/str_list.h"
+#include "global/global_init.h"
+#include "mon/AuthMonitor.h"
 
 using std::deque;
 using std::string;
@@ -156,9 +148,10 @@ int main(int argc, const char **argv)
 
   argv_to_vec(argc, argv, args);
   env_to_vec(args);
+  vector<const char*> orig_args = args;
 
-  global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_DAEMON,
-	      CINIT_FLAG_NO_DAEMON_ACTIONS);
+  global_pre_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_DAEMON,
+		  CINIT_FLAG_NO_DAEMON_ACTIONS);
 
   // do not common_init_finish(); do not start threads; do not do any of thing
   // wonky things the daemon whose conf we are examining would do (like initialize
@@ -202,12 +195,18 @@ int main(int argc, const char **argv)
 	lookup_key = *i++;
       } else {
 	cerr << "unable to parse option: '" << *i << "'" << std::endl;
+	cerr << "args:";
+	for (std::vector<const char *>::iterator ci = orig_args.begin(); ci != orig_args.end(); ++ci) {
+	  cerr << " '" << *ci << "'";
+	}
+	cerr << std::endl;
 	usage();
 	exit(1);
       }
     }
   }
 
+  g_ceph_context->_log->flush();
   if (action == "help") {
     usage();
     exit(0);

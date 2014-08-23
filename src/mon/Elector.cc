@@ -110,7 +110,7 @@ void Elector::defer(int who)
   leader_acked = who;
   ack_stamp = ceph_clock_now(g_ceph_context);
   MMonElection *m = new MMonElection(MMonElection::OP_ACK, epoch, mon->monmap);
-  m->commands = mon->get_supported_commands_bl();
+  m->sharing_bl = mon->get_supported_commands_bl();
   mon->messenger->send_message(m, mon->monmap->get_inst(who));
   
   // set a timer
@@ -147,7 +147,10 @@ void Elector::expire()
     victory();
   } else {
     // whoever i deferred to didn't declare victory quickly enough.
-    start();
+    if (mon->has_ever_joined)
+      start();
+    else
+      mon->bootstrap();
   }
 }
 
@@ -195,7 +198,7 @@ void Elector::victory()
     MMonElection *m = new MMonElection(MMonElection::OP_VICTORY, epoch, mon->monmap);
     m->quorum = quorum;
     m->quorum_features = features;
-    m->commands = *cmds_bl;
+    m->sharing_bl = *cmds_bl;
     mon->messenger->send_message(m, mon->monmap->get_inst(*p));
   }
     
@@ -210,10 +213,16 @@ void Elector::handle_propose(MMonElection *m)
   int from = m->get_source().num();
 
   assert(m->epoch % 2 == 1); // election
-  if (m->epoch > epoch) {
+  uint64_t required_features = mon->get_required_features();
+  if ((required_features ^ m->get_connection()->get_features()) &
+      required_features) {
+    dout(5) << " ignoring propose from mon" << from
+	    << " without required features" << dendl;
+    nak_old_peer(m);
+    return;
+  } else if (m->epoch > epoch) {
     bump_epoch(m->epoch);
-  }
-  else if (m->epoch < epoch) {
+  } else if (m->epoch < epoch) {
     // got an "old" propose,
     if (epoch % 2 == 0 &&    // in a non-election cycle
 	mon->quorum.count(from) == 0) {  // from someone outside the quorum
@@ -269,11 +278,18 @@ void Elector::handle_ack(MMonElection *m)
     return;
   }
   assert(m->epoch == epoch);
+  uint64_t required_features = mon->get_required_features();
+  if ((required_features ^ m->get_connection()->get_features()) &
+      required_features) {
+    dout(5) << " ignoring ack from mon" << from
+	    << " without required features" << dendl;
+    return;
+  }
   
   if (electing_me) {
     // thanks
     acked_me[from] = m->get_connection()->get_features();
-    if (!m->commands.length())
+    if (!m->sharing_bl.length())
       classic_mons.insert(from);
     dout(5) << " so far i have " << acked_me << dendl;
     
@@ -319,10 +335,10 @@ void Elector::handle_victory(MMonElection *m)
   cancel_timer();
 
   // stash leader's commands
-  if (m->commands.length()) {
+  if (m->sharing_bl.length()) {
     MonCommand *new_cmds;
     int cmdsize;
-    bufferlist::iterator bi = m->commands.begin();
+    bufferlist::iterator bi = m->sharing_bl.begin();
     MonCommand::decode_array(&new_cmds, &cmdsize, bi);
     mon->set_leader_supported_commands(new_cmds, cmdsize);
   } else { // they are a legacy monitor; use known legacy command set
@@ -335,8 +351,41 @@ void Elector::handle_victory(MMonElection *m)
   m->put();
 }
 
+void Elector::nak_old_peer(MMonElection *m)
+{
+  uint64_t supported_features = m->get_connection()->get_features();
 
+  if (supported_features & CEPH_FEATURE_OSDMAP_ENC) {
+    uint64_t required_features = mon->get_required_features();
+    dout(10) << "sending nak to peer " << m->get_source()
+	     << " that only supports " << supported_features
+	     << " of the required " << required_features << dendl;
+    
+    MMonElection *reply = new MMonElection(MMonElection::OP_NAK, m->epoch,
+					   mon->monmap);
+    reply->quorum_features = required_features;
+    mon->features.encode(reply->sharing_bl);
+    m->get_connection()->send_message(reply);
+  }
+  m->put();
+}
 
+void Elector::handle_nak(MMonElection *m)
+{
+  dout(1) << "handle_nak from " << m->get_source()
+	  << " quorum_features " << m->quorum_features << dendl;
+
+  CompatSet other;
+  bufferlist::iterator bi = m->sharing_bl.begin();
+  other.decode(bi);
+  CompatSet diff = Monitor::get_supported_features().unsupported(other);
+  
+  derr << "Shutting down because I do not support required monitor features: { "
+       << diff << " }" << dendl;
+  
+  exit(0);
+  // the end!
+}
 
 void Elector::dispatch(Message *m)
 {
@@ -416,6 +465,9 @@ void Elector::dispatch(Message *m)
 	return;
       case MMonElection::OP_VICTORY:
 	handle_victory(em);
+	return;
+      case MMonElection::OP_NAK:
+	handle_nak(em);
 	return;
       default:
 	assert(0);

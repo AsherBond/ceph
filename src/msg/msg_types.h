@@ -20,16 +20,10 @@
 #include "include/types.h"
 #include "include/blobhash.h"
 #include "include/encoding.h"
+#include "include/hash_namespace.h"
 
 namespace ceph {
   class Formatter;
-}
-
-inline bool operator==(const sockaddr_in& a, const sockaddr_in& b) {
-  return strncmp((const char*)&a, (const char*)&b, sizeof(a)) == 0;
-}
-inline bool operator!=(const sockaddr_in& a, const sockaddr_in& b) {
-  return strncmp((const char*)&a, (const char*)&b, sizeof(a)) != 0;
 }
 
 extern ostream& operator<<(ostream& out, const sockaddr_storage &ss);
@@ -139,7 +133,7 @@ inline std::ostream& operator<<(std::ostream& out, const ceph_entity_name& addr)
   return out << *(const entity_name_t*)&addr;
 }
 
-namespace __gnu_cxx {
+CEPH_HASH_NAMESPACE_START
   template<> struct hash< entity_name_t >
   {
     size_t operator()( const entity_name_t &m ) const
@@ -147,7 +141,7 @@ namespace __gnu_cxx {
       return rjhash32(m.type() ^ m.num());
     }
   };
-}
+CEPH_HASH_NAMESPACE_END
 
 
 
@@ -359,7 +353,7 @@ inline bool operator<=(const entity_addr_t& a, const entity_addr_t& b) { return 
 inline bool operator>(const entity_addr_t& a, const entity_addr_t& b) { return memcmp(&a, &b, sizeof(a)) > 0; }
 inline bool operator>=(const entity_addr_t& a, const entity_addr_t& b) { return memcmp(&a, &b, sizeof(a)) >= 0; }
 
-namespace __gnu_cxx {
+CEPH_HASH_NAMESPACE_START
   template<> struct hash< entity_addr_t >
   {
     size_t operator()( const entity_addr_t& x ) const
@@ -368,7 +362,7 @@ namespace __gnu_cxx {
       return H((const char*)&x, sizeof(x));
     }
   };
-}
+CEPH_HASH_NAMESPACE_END
 
 
 /*
@@ -413,7 +407,7 @@ inline bool operator<=(const entity_inst_t& a, const entity_inst_t& b) {
 inline bool operator>(const entity_inst_t& a, const entity_inst_t& b) { return b < a; }
 inline bool operator>=(const entity_inst_t& a, const entity_inst_t& b) { return b <= a; }
 
-namespace __gnu_cxx {
+CEPH_HASH_NAMESPACE_START
   template<> struct hash< entity_inst_t >
   {
     size_t operator()( const entity_inst_t& x ) const
@@ -423,7 +417,7 @@ namespace __gnu_cxx {
       return H(x.name) ^ I(x.addr);
     }
   };
-}
+CEPH_HASH_NAMESPACE_END
 
 
 inline ostream& operator<<(ostream& out, const entity_inst_t &i)

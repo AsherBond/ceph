@@ -38,7 +38,9 @@ inline const char *get_lock_type_name(int t) {
   }
 }
 
-struct Mutation;
+#include "include/memory.h"
+struct MutationImpl;
+typedef ceph::shared_ptr<MutationImpl> MutationRef;
 
 extern "C" {
 #include "locks.h"
@@ -166,7 +168,7 @@ private:
 
     // local state
     int num_wrlock, num_xlock;
-    Mutation *xlock_by;
+    MutationRef xlock_by;
     client_t xlock_by_client;
     client_t excl_client;
 
@@ -175,14 +177,14 @@ private:
 	gather_set.empty() &&
 	num_wrlock == 0 &&
 	num_xlock == 0 &&
-	xlock_by == NULL &&
+	xlock_by.get() == NULL &&
 	xlock_by_client == -1 &&
 	excl_client == -1;
     }
 
     unstable_bits_t() : num_wrlock(0),
 			num_xlock(0),
-			xlock_by(NULL),
+			xlock_by(),
 			xlock_by_client(-1),
 			excl_client(-1) {}
   };
@@ -194,13 +196,6 @@ private:
     if (!_unstable)
       _unstable = new unstable_bits_t;
     return _unstable;
-  }
-  void clear_more() {
-    if (_unstable) {
-      assert(_unstable->empty());
-      delete _unstable;
-      _unstable = NULL;
-    }
   }
   void try_clear_more() {
     if (_unstable && _unstable->empty()) {
@@ -282,8 +277,8 @@ public:
   struct ptr_lt {
     bool operator()(const SimpleLock* l, const SimpleLock* r) const {
       // first sort by object type (dn < inode)
-      if ((l->type->type>CEPH_LOCK_DN) <  (r->type->type>CEPH_LOCK_DN)) return true;
-      if ((l->type->type>CEPH_LOCK_DN) == (r->type->type>CEPH_LOCK_DN)) {
+      if (!(l->type->type > CEPH_LOCK_DN) && (r->type->type > CEPH_LOCK_DN)) return true;
+      if ((l->type->type > CEPH_LOCK_DN) == (r->type->type > CEPH_LOCK_DN)) {
 	// then sort by object
 	if (l->parent->is_lt(r->parent)) return true;
 	if (l->parent == r->parent) {
@@ -330,7 +325,8 @@ public:
     } else {
       state = s;
     }
-    take_waiting(SimpleLock::WAIT_ALL, waiters);
+    if (is_stable())
+      take_waiting(SimpleLock::WAIT_ALL, waiters);
   }
 
   bool is_stable() const {
@@ -373,8 +369,10 @@ public:
 	 ++p)
       more()->gather_set.insert(p->first);
   }
-  bool is_gathering() { return have_more() && !more()->gather_set.empty(); }
-  bool is_gathering(int i) {
+  bool is_gathering() const {
+    return have_more() && !more()->gather_set.empty();
+  }
+  bool is_gathering(int i) const {
     return have_more() && more()->gather_set.count(i);
   }
   void clear_gather() {
@@ -473,8 +471,8 @@ public:
   }
 
   // xlock
-  void get_xlock(Mutation *who, client_t client) { 
-    assert(get_xlock_by() == 0);
+  void get_xlock(MutationRef who, client_t client) { 
+    assert(get_xlock_by() == MutationRef());
     assert(state == LOCK_XLOCK || is_locallock() ||
 	   state == LOCK_LOCK /* if we are a slave */);
     parent->get(MDSCacheObject::PIN_LOCK);
@@ -488,7 +486,7 @@ public:
 	   state == LOCK_LOCK /* if we are a slave */);
     if (!is_locallock())
       state = LOCK_XLOCKDONE;
-    more()->xlock_by = 0;
+    more()->xlock_by.reset();
   }
   void put_xlock() {
     assert(state == LOCK_XLOCK || state == LOCK_XLOCKDONE || is_locallock() ||
@@ -496,7 +494,7 @@ public:
     --more()->num_xlock;
     parent->put(MDSCacheObject::PIN_LOCK);
     if (more()->num_xlock == 0) {
-      more()->xlock_by = 0;
+      more()->xlock_by.reset();
       more()->xlock_by_client = -1;
       try_clear_more();
     }
@@ -513,11 +511,8 @@ public:
   bool is_xlocked_by_client(client_t c) const {
     return have_more() ? more()->xlock_by_client == c : false;
   }
-  Mutation *get_xlock_by() {
-    return have_more() ? more()->xlock_by : NULL;
-  }
-  const Mutation *get_xlock_by() const {
-    return have_more() ? more()->xlock_by : NULL;
+  MutationRef get_xlock_by() const {
+    return have_more() ? more()->xlock_by : MutationRef();
   }
   
   // lease

@@ -4,6 +4,9 @@
  * Ceph - scalable distributed file system
  *
  * Copyright (C) 2004-2006 Sage Weil <sage@newdream.net>
+ * Copyright (C) 2013,2014 Cloudwatt <libre.licensing@cloudwatt.com>
+ *
+ * Author: Loic Dachary <loic@dachary.org>
  *
  * This is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -36,6 +39,8 @@ class Monitor;
 #include "messages/MOSDMap.h"
 #include "messages/MOSDFailure.h"
 #include "messages/MPoolOp.h"
+
+#include "erasure-code/ErasureCodeInterface.h"
 
 #define OSD_METADATA_PREFIX "osd_metadata"
 
@@ -180,6 +185,16 @@ private:
   void encode_trim_extra(MonitorDBStore::Transaction *tx, version_t first);
 
   void update_msgr_features();
+  int check_cluster_features(uint64_t features, stringstream &ss);
+  /**
+   * check if the cluster supports the features required by the
+   * given crush map. Outputs the daemons which don't support it
+   * to the stringstream.
+   *
+   * @returns true if the map is passable, false otherwise
+   */
+  bool validate_crush_against_features(const CrushWrapper *newcrush,
+                                      stringstream &ss);
 
   void share_map_with_random_osd();
 
@@ -204,9 +219,8 @@ private:
   void send_incremental(PaxosServiceMessage *m, epoch_t first);
   void send_incremental(epoch_t first, entity_inst_t& dest, bool onetime);
 
-  void remove_redundant_pg_temp();
-  void remove_down_pg_temp();
-  int reweight_by_utilization(int oload, std::string& out_str);
+  int reweight_by_utilization(int oload, std::string& out_str, bool by_pg,
+			      const set<int64_t> *pools);
 
   bool check_source(PaxosServiceMessage *m, uuid_d fsid);
  
@@ -230,7 +244,8 @@ private:
   bool preprocess_pgtemp(class MOSDPGTemp *m);
   bool prepare_pgtemp(class MOSDPGTemp *m);
 
-  int _prepare_remove_pool(uint64_t pool);
+  int _check_remove_pool(int64_t pool, const pg_pool_t *pi, ostream *ss);
+  int _prepare_remove_pool(int64_t pool, ostream *ss);
   int _prepare_rename_pool(int64_t pool, string newname);
 
   bool preprocess_pool_op ( class MPoolOp *m);
@@ -238,9 +253,40 @@ private:
   bool prepare_pool_op (MPoolOp *m);
   bool prepare_pool_op_create (MPoolOp *m);
   bool prepare_pool_op_delete(MPoolOp *m);
-  int prepare_new_pool(string& name, uint64_t auid, int crush_rule,
+  int crush_ruleset_create_erasure(const string &name,
+				   const string &profile,
+				   int *ruleset,
+				   stringstream &ss);
+  int get_erasure_code(const string &erasure_code_profile,
+		       ErasureCodeInterfaceRef *erasure_code,
+		       stringstream &ss) const;
+  int prepare_pool_crush_ruleset(const unsigned pool_type,
+				 const string &erasure_code_profile,
+				 const string &ruleset_name,
+				 int *crush_ruleset,
+				 stringstream &ss);
+  bool erasure_code_profile_in_use(const map<int64_t, pg_pool_t> &pools,
+				   const string &profile,
+				   ostream &ss);
+  int parse_erasure_code_profile(const vector<string> &erasure_code_profile,
+				 map<string,string> *erasure_code_profile_map,
+				 stringstream &ss);
+  int prepare_pool_size(const unsigned pool_type,
+			const string &erasure_code_profile,
+			unsigned *size, unsigned *min_size,
+			stringstream &ss);
+  int prepare_pool_stripe_width(const unsigned pool_type,
+				const string &erasure_code_profile,
+				unsigned *stripe_width,
+				stringstream &ss);
+  int prepare_new_pool(string& name, uint64_t auid,
+		       int crush_ruleset,
+		       const string &crush_ruleset_name,
                        unsigned pg_num, unsigned pgp_num,
-		       const vector<string> &properties);
+		       const string &erasure_code_profile,
+                       const unsigned pool_type,
+                       const uint64_t expected_num_objects,
+		       stringstream &ss);
   int prepare_new_pool(MPoolOp *m);
 
   void update_pool_flags(int64_t pool_id, uint64_t flags);
@@ -321,13 +367,14 @@ private:
   void tick();  // check state, take actions
 
   int parse_osd_id(const char *s, stringstream *pss);
-  void parse_loc_map(const vector<string>& args, map<string,string> *ploc);
 
   void get_health(list<pair<health_status_t,string> >& summary,
 		  list<pair<health_status_t,string> > *detail) const;
   bool preprocess_command(MMonCommand *m);
   bool prepare_command(MMonCommand *m);
+  bool prepare_command_impl(MMonCommand *m, map<string,cmd_vartype> &cmdmap);
 
+  int set_crash_replay_interval(const int64_t pool_id, const uint32_t cri);
   int prepare_command_pool_set(map<string,cmd_vartype> &cmdmap,
                                stringstream& ss);
 

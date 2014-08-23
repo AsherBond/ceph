@@ -21,8 +21,8 @@ EXTRA_DIST += \
 install-data-local:
 	-mkdir -p $(DESTDIR)$(datadir)/ceph
 	-install -m 644 share/known_hosts_drop.ceph.com $(DESTDIR)$(datadir)/ceph/known_hosts_drop.ceph.com
-	-install -m 644 share/known_hosts_drop.ceph.com $(DESTDIR)$(datadir)/ceph/id_dsa_drop.ceph.com
-	-install -m 644 share/known_hosts_drop.ceph.com $(DESTDIR)$(datadir)/ceph/id_dsa_drop.ceph.com.pub
+	-install -m 644 share/id_dsa_drop.ceph.com $(DESTDIR)$(datadir)/ceph/id_dsa_drop.ceph.com
+	-install -m 644 share/id_dsa_drop.ceph.com.pub $(DESTDIR)$(datadir)/ceph/id_dsa_drop.ceph.com.pub
 
 all-local:
 if WITH_DEBUG
@@ -48,3 +48,26 @@ clean-local:
 	fi
 
 	@rm -rf src/test/virtualenv
+
+
+# NOTE: This only works when enough dependencies are installed for
+# autoconf to be happy.  These commands should be run manually to
+# bootstrap.
+install-deps:
+	if test -x /usr/bin/apt-get; then \
+	  sudo apt-get -y --no-install-recommends install `cat deps.deb.txt`; \
+	else \
+	  sudo yum -y install `cat deps.rpm.txt`; \
+	fi
+
+dist-hook:
+#	Generates the full list of contributors
+	if test -d $(srcdir)/.git; then \
+	  cd $(srcdir); \
+	  git log --format='%aN <%aE>' | sort -u >$(distdir)/AUTHORS; \
+	fi
+#	Generates ChangeLog from git
+	if test -d $(srcdir)/.git; then \
+	  cd $(srcdir); \
+	  git log --oneline --decorate --no-merges > $(distdir)/ChangeLog; \
+	fi

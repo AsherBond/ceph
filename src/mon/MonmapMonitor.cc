@@ -21,6 +21,7 @@
 
 #include "common/Timer.h"
 #include "common/ceph_argparse.h"
+#include "common/errno.h"
 #include "mon/MDSMonitor.h"
 #include "mon/OSDMonitor.h"
 #include "mon/PGMonitor.h"
@@ -96,6 +97,11 @@ void MonmapMonitor::encode_pending(MonitorDBStore::Transaction *t)
 
   put_version(t, pending_map.epoch, bl);
   put_last_committed(t, pending_map.epoch);
+
+  // generate a cluster fingerprint, too?
+  if (pending_map.epoch == 1) {
+    mon->prepare_new_fingerprint(t);
+  }
 }
 
 void MonmapMonitor::on_active()
@@ -203,7 +209,7 @@ bool MonmapMonitor::preprocess_command(MMonCommand *m)
     assert(p != NULL);
 
     if (prefix == "mon getmap") {
-      p->encode(rdata, CEPH_FEATURES_ALL);
+      p->encode(rdata, m->get_connection()->get_features());
       r = 0;
       ss << "got monmap epoch " << p->get_epoch();
     } else if (prefix == "mon dump") {
@@ -346,7 +352,7 @@ bool MonmapMonitor::prepare_command(MMonCommand *m)
     pending_map.last_changed = ceph_clock_now(g_ceph_context);
     getline(ss, rs);
     wait_for_finished_proposal(new Monitor::C_Command(mon, m, 0, rs,
-                                                      get_last_committed()));
+                                                     get_last_committed() + 1));
     return true;
 
   } else if (prefix == "mon remove") {

@@ -48,6 +48,7 @@ enum {
 #include <list>
 
 class Journaler;
+class JournalPointer;
 class LogEvent;
 class MDS;
 class LogSegment;
@@ -68,6 +69,8 @@ protected:
   int unflushed;
 
   bool capped;
+
+  bool stopping;
 
   inodeno_t ino;
   Journaler *journaler;
@@ -97,21 +100,58 @@ protected:
   void _replay();         // old way
   void _replay_thread();  // new way
 
+  // Journal recovery/rewrite logic
+  class RecoveryThread : public Thread {
+    MDLog *log;
+    Context *completion;
+  public:
+    void set_completion(Context *c) {completion = c;}
+    RecoveryThread(MDLog *l) : log(l), completion(NULL) {}
+    void* entry() {
+      log->_recovery_thread(completion);
+      return 0;
+    }
+  } recovery_thread;
+  void _recovery_thread(Context *completion);
+  void _reformat_journal(JournalPointer const &jp, Journaler *old_journal, Context *completion);
 
   // -- segments --
   map<uint64_t,LogSegment*> segments;
   set<LogSegment*> expiring_segments;
   set<LogSegment*> expired_segments;
+  uint64_t event_seq;
   int expiring_events;
   int expired_events;
+
+  struct PendingEvent {
+    LogEvent *le;
+    Context *fin;
+    bool flush;
+    PendingEvent(LogEvent *e, Context *c, bool f=false) : le(e), fin(c), flush(f) {}
+  };
+
+  map<uint64_t,list<PendingEvent> > pending_events; // log segment -> event list
+  Mutex submit_mutex;
+  Cond submit_cond;
+
+  void _submit_thread();
+  class SubmitThread : public Thread {
+    MDLog *log;
+  public:
+    SubmitThread(MDLog *l) : log(l) {}
+    void* entry() {
+      log->_submit_thread();
+      return 0;
+    }
+  } submit_thread;
+  friend class SubmitThread;
 
   // -- subtreemaps --
   friend class ESubtreeMap;
   friend class C_MDS_WroteImportMap;
   friend class MDCache;
 
-public:
-  uint64_t get_last_segment_offset() {
+  uint64_t get_last_segment_seq() {
     assert(!segments.empty());
     return segments.rbegin()->first;
   }
@@ -123,10 +163,6 @@ public:
     delete p->second;
     segments.erase(p);
   }
-
-
-private:
-  void init_journaler();
 
   struct C_MDL_WriteError : public Context {
     MDLog *mdlog;
@@ -150,19 +186,40 @@ public:
 		  num_events(0), 
 		  unflushed(0),
 		  capped(false),
+		  stopping(false),
 		  journaler(0),
 		  logger(0),
 		  replay_thread(this),
 		  already_replayed(false),
-		  expiring_events(0), expired_events(0),
+		  recovery_thread(this),
+		  event_seq(0), expiring_events(0), expired_events(0),
+		  submit_mutex("MDLog::submit_mutex"),
+		  submit_thread(this),
 		  cur_event(NULL) { }		  
   ~MDLog();
 
 
+private:
   // -- segments --
-  void start_new_segment(Context *onsync=0);
-  void prepare_new_segment();
-  void journal_segment_subtree_map();
+  void _start_new_segment();
+  void _prepare_new_segment();
+  void _journal_segment_subtree_map(Context *onsync);
+public:
+  void start_new_segment() {
+    Mutex::Locker l(submit_mutex);
+    _start_new_segment();
+  }
+  void prepare_new_segment() {
+    Mutex::Locker l(submit_mutex);
+    _prepare_new_segment();
+  }
+  void journal_segment_subtree_map(Context *onsync=NULL) {
+    submit_mutex.Lock();
+    _journal_segment_subtree_map(onsync);
+    submit_mutex.Unlock();
+    if (onsync)
+      flush();
+  }
 
   LogSegment *peek_current_segment() {
     return segments.empty() ? NULL : segments.rbegin()->second;
@@ -173,9 +230,9 @@ public:
     return segments.rbegin()->second;
   }
 
-  LogSegment *get_segment(uint64_t off) {
-    if (segments.count(off))
-      return segments[off];
+  LogSegment *get_segment(uint64_t seq) {
+    if (segments.count(seq))
+      return segments[seq];
     return NULL;
   }
 
@@ -197,15 +254,29 @@ public:
   bool is_capped() { return capped; }
   void cap();
 
+  void shutdown();
+
   // -- events --
 private:
   LogEvent *cur_event;
 public:
-  void start_entry(LogEvent *e);
-  void submit_entry(LogEvent *e, Context *c = 0);
+  void _start_entry(LogEvent *e);
+  void start_entry(LogEvent *e) {
+    Mutex::Locker l(submit_mutex);
+    _start_entry(e);
+  }
+  void cancel_entry(LogEvent *e);
+  void _submit_entry(LogEvent *e, Context *c);
+  void submit_entry(LogEvent *e, Context *c = 0) {
+    Mutex::Locker l(submit_mutex);
+    _submit_entry(e, c);
+    submit_cond.Signal();
+  }
   void start_submit_entry(LogEvent *e, Context *c = 0) {
-    start_entry(e);
-    submit_entry(e, c);
+    Mutex::Locker l(submit_mutex);
+    _start_entry(e);
+    _submit_entry(e, c);
+    submit_cond.Signal();
   }
   bool entry_is_open() { return cur_event != NULL; }
 
@@ -219,15 +290,16 @@ private:
   class C_MaybeExpiredSegment : public Context {
     MDLog *mdlog;
     LogSegment *ls;
+    int op_prio;
   public:
-    C_MaybeExpiredSegment(MDLog *mdl, LogSegment *s) : mdlog(mdl), ls(s) {}
+    C_MaybeExpiredSegment(MDLog *mdl, LogSegment *s, int p) : mdlog(mdl), ls(s), op_prio(p) {}
     void finish(int res) {
-      mdlog->_maybe_expired(ls);
+      mdlog->_maybe_expired(ls, op_prio);
     }
   };
 
-  void try_expire(LogSegment *ls);
-  void _maybe_expired(LogSegment *ls);
+  void try_expire(LogSegment *ls, int op_prio);
+  void _maybe_expired(LogSegment *ls, int op_prio);
   void _expired(LogSegment *ls);
   void _trim_expired_segments();
 
@@ -240,6 +312,7 @@ private:
 public:
   void create(Context *onfinish);  // fresh, empty log! 
   void open(Context *onopen);      // append() or replay() to follow!
+  void reopen(Context *onopen);
   void append();
   void replay(Context *onfinish);
 

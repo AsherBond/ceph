@@ -1,3 +1,6 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+
 #include <string.h>
 
 #include <iostream>
@@ -48,7 +51,8 @@ bool RGWMultiCompleteUpload::xml_end(const char *el) {
 
 XMLObj *RGWMultiXMLParser::alloc_obj(const char *el) {
   XMLObj *obj = NULL;
-  if (strcmp(el, "CompleteMultipartUpload") == 0) {
+  if (strcmp(el, "CompleteMultipartUpload") == 0 ||
+      strcmp(el, "MultipartUpload") == 0) {
     obj = new RGWMultiCompleteUpload();
   } else if (strcmp(el, "Part") == 0) {
     obj = new RGWMultiPart();

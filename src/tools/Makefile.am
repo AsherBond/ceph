@@ -1,25 +1,25 @@
-ceph_osdomap_tool_SOURCES = tools/ceph-osdomap-tool.cc
+ceph_osdomap_tool_SOURCES = tools/ceph_osdomap_tool.cc
 ceph_osdomap_tool_LDADD = $(LIBOS) $(CEPH_GLOBAL) $(BOOST_PROGRAM_OPTIONS_LIBS)
 bin_DEBUGPROGRAMS += ceph-osdomap-tool
 
-ceph_monstore_tool_SOURCES = tools/ceph-monstore-tool.cc
+ceph_monstore_tool_SOURCES = tools/ceph_monstore_tool.cc
 ceph_monstore_tool_LDADD = $(LIBOS) $(CEPH_GLOBAL) $(BOOST_PROGRAM_OPTIONS_LIBS)
 bin_DEBUGPROGRAMS += ceph-monstore-tool
 
-ceph_kvstore_tool_SOURCES = tools/ceph-kvstore-tool.cc
+ceph_kvstore_tool_SOURCES = tools/ceph_kvstore_tool.cc
 ceph_kvstore_tool_LDADD = $(LIBOS) $(CEPH_GLOBAL)
 ceph_kvstore_tool_CXXFLAGS = $(UNITTEST_CXXFLAGS)
 bin_DEBUGPROGRAMS += ceph-kvstore-tool
 
 
-ceph_filestore_tool_SOURCES = tools/ceph-filestore-tool.cc
+ceph_filestore_tool_SOURCES = tools/ceph_filestore_tool.cc
 ceph_filestore_tool_LDADD = $(LIBOSD) $(LIBOS) $(CEPH_GLOBAL) -lboost_program_options
 if LINUX
 ceph_filestore_tool_LDADD += -ldl
 endif # LINUX
 bin_PROGRAMS += ceph_filestore_tool
 
-ceph_filestore_dump_SOURCES = tools/ceph-filestore-dump.cc
+ceph_filestore_dump_SOURCES = tools/ceph_filestore_dump.cc
 ceph_filestore_dump_LDADD = $(LIBOSD) $(LIBOS) $(CEPH_GLOBAL) $(BOOST_PROGRAM_OPTIONS_LIBS)
 if LINUX
 ceph_filestore_dump_LDADD += -ldl
@@ -27,7 +27,7 @@ endif # LINUX
 bin_PROGRAMS += ceph_filestore_dump
 
 monmaptool_SOURCES = tools/monmaptool.cc
-monmaptool_LDADD = $(CEPH_GLOBAL)
+monmaptool_LDADD = $(CEPH_GLOBAL) $(LIBCOMMON)
 bin_PROGRAMS += monmaptool
 
 crushtool_SOURCES = tools/crushtool.cc
@@ -58,6 +58,10 @@ ceph_radosacl_SOURCES = tools/radosacl.cc
 ceph_radosacl_LDADD = $(LIBRADOS) $(CEPH_GLOBAL)
 bin_DEBUGPROGRAMS += ceph_radosacl
 
+ceph_client_debug_SOURCES = tools/ceph-client-debug.cc
+ceph_client_debug_LDADD = $(LIBCEPHFS) $(CEPH_GLOBAL) $(LIBCOMMON)
+bin_DEBUGPROGRAMS += ceph-client-debug
+
 rados_SOURCES = \
 	tools/rados/rados.cc \
 	tools/rados/rados_import.cc \
@@ -66,6 +70,18 @@ rados_SOURCES = \
 rados_SOURCES += common/obj_bencher.cc # needs cleanup so it can go in libcommon.la
 rados_LDADD = libcls_lock_client.la $(LIBRADOS) $(CEPH_GLOBAL)
 bin_PROGRAMS += rados
+
+cephfs_journal_tool_SOURCES = \
+	tools/cephfs/cephfs-journal-tool.cc \
+	tools/cephfs/JournalTool.cc \
+	tools/cephfs/JournalFilter.cc \
+	tools/cephfs/JournalScanner.cc \
+	tools/cephfs/EventOutput.cc \
+	tools/cephfs/Dumper.cc \
+	tools/cephfs/Resetter.cc \
+	tools/cephfs/MDSUtility.cc
+cephfs_journal_tool_LDADD = $(LIBMDS) $(LIBRADOS) $(CEPH_GLOBAL)
+bin_PROGRAMS += cephfs-journal-tool
 
 if WITH_REST_BENCH
 rest_bench_SOURCES = tools/rest_bench.cc
@@ -83,11 +99,11 @@ endif # WITH_SYSTEM_LIBS3
 endif # WITH_REST_BENCH
 
 ceph_conf_SOURCES = tools/ceph_conf.cc
-ceph_conf_LDADD = $(CEPH_GLOBAL)
+ceph_conf_LDADD = $(CEPH_GLOBAL) $(LIBCOMMON)
 bin_PROGRAMS += ceph-conf
 
 ceph_authtool_SOURCES = tools/ceph_authtool.cc
-ceph_authtool_LDADD = $(CEPH_GLOBAL)
+ceph_authtool_LDADD = $(CEPH_GLOBAL) $(LIBCOMMON)
 bin_PROGRAMS += ceph-authtool
 
 ceph_mon_store_converter_SOURCES = tools/mon_store_converter.cc
@@ -95,6 +111,13 @@ ceph_mon_store_converter_LDADD = $(LIBMON) $(LIBOS) $(CEPH_GLOBAL)
 bin_PROGRAMS += ceph_mon_store_converter
 
 noinst_HEADERS += \
+	tools/cephfs/JournalTool.h \
+	tools/cephfs/JournalScanner.h \
+	tools/cephfs/JournalFilter.h \
+	tools/cephfs/EventOutput.h \
+	tools/cephfs/Resetter.h \
+	tools/cephfs/Dumper.h \
+	tools/cephfs/MDSUtility.h \
 	tools/rados/rados_sync.h \
 	tools/common.h
 

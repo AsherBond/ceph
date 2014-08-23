@@ -4,7 +4,7 @@
 #include "KeyValueDBMemory.h"
 #include <map>
 #include <set>
-#include <tr1/memory>
+#include "include/memory.h"
 #include <iostream>
 
 using namespace std;
@@ -80,7 +80,7 @@ public:
 
   int lower_bound(const string &prefix, const string &to) {
     it = db->db.lower_bound(make_pair(prefix,to));
-    if ((db->db.size() == 0) || (it == db->db.end())) {
+    if ((db->db.empty()) || (it == db->db.end())) {
       it = db->db.end();
       ready = false;
       return 0;
@@ -94,7 +94,7 @@ public:
 
   int upper_bound(const string &prefix, const string &after) {
     it = db->db.upper_bound(make_pair(prefix,after));
-    if ((db->db.size() == 0) || (it == db->db.end())) {
+    if ((db->db.empty()) || (it == db->db.end())) {
       it = db->db.end();
       ready = false;
       return 0;
@@ -214,7 +214,7 @@ int KeyValueDBMemory::rmkeys_by_prefix(const string &prefix) {
 }
 
 KeyValueDB::WholeSpaceIterator KeyValueDBMemory::_get_iterator() {
-  return std::tr1::shared_ptr<KeyValueDB::WholeSpaceIteratorImpl>(
+  return ceph::shared_ptr<KeyValueDB::WholeSpaceIteratorImpl>(
     new WholeSpaceMemIterator(this)
   );
 }
@@ -243,7 +243,7 @@ public:
 
 KeyValueDB::WholeSpaceIterator KeyValueDBMemory::_get_snapshot_iterator() {
   KeyValueDBMemory *snap_db = new KeyValueDBMemory(this);
-  return std::tr1::shared_ptr<KeyValueDB::WholeSpaceIteratorImpl>(
+  return ceph::shared_ptr<KeyValueDB::WholeSpaceIteratorImpl>(
     new WholeSpaceSnapshotMemIterator(snap_db)
   );
 }

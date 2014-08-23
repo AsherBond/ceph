@@ -20,9 +20,9 @@
 #include "common/simple_spin.h"
 #include "common/strtol.h"
 #include "include/atomic.h"
+#include "common/Mutex.h"
 #include "include/types.h"
 #include "include/compat.h"
-#include "include/Spinlock.h"
 
 #include <errno.h>
 #include <fstream>
@@ -94,7 +94,7 @@ static uint32_t simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZE
     if (r < 0)
       return r;
     buf[r] = '\0';
-    size = strict_strtol(buf, 10, &err);
+    size_t size = strict_strtol(buf, 10, &err);
     if (!err.empty())
       return -EIO;
     buffer_max_pipe_size.set(size);
@@ -108,7 +108,7 @@ static uint32_t simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZE
     if (size)
       return size;
     if (update_max_pipe_size() == 0)
-      return buffer_max_pipe_size.read()
+      return buffer_max_pipe_size.read();
 #endif
     // this is the max size hardcoded in linux before 2.6.35
     return 65536;
@@ -123,14 +123,18 @@ static uint32_t simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZE
     unsigned len;
     atomic_t nref;
 
-    Spinlock crc_lock;
+    mutable Mutex crc_lock;
     map<pair<size_t, size_t>, pair<uint32_t, uint32_t> > crc_map;
 
-    raw(unsigned l) : data(NULL), len(l), nref(0)
+    raw(unsigned l)
+      : data(NULL), len(l), nref(0),
+	crc_lock("buffer::raw::crc_lock", false, false)
     { }
-    raw(char *c, unsigned l) : data(c), len(l), nref(0)
+    raw(char *c, unsigned l)
+      : data(c), len(l), nref(0),
+	crc_lock("buffer::raw::crc_lock", false, false)
     { }
-    virtual ~raw() {};
+    virtual ~raw() {}
 
     // no copying.
     raw(const raw &other);
@@ -159,7 +163,7 @@ static uint32_t simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZE
     }
     bool get_crc(const pair<size_t, size_t> &fromto,
 		 pair<uint32_t, uint32_t> *crc) const {
-      Spinlock::Locker l(crc_lock);
+      Mutex::Locker l(crc_lock);
       map<pair<size_t, size_t>, pair<uint32_t, uint32_t> >::const_iterator i =
 	crc_map.find(fromto);
       if (i == crc_map.end())
@@ -169,11 +173,11 @@ static uint32_t simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZE
     }
     void set_crc(const pair<size_t, size_t> &fromto,
 		 const pair<uint32_t, uint32_t> &crc) {
-      Spinlock::Locker l(crc_lock);
+      Mutex::Locker l(crc_lock);
       crc_map[fromto] = crc;
     }
     void invalidate_crc() {
-      Spinlock::Locker l(crc_lock);
+      Mutex::Locker l(crc_lock);
       crc_map.clear();
     }
   };
@@ -399,9 +403,9 @@ static uint32_t simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZE
 
     void close_pipe(int *fds) {
       if (fds[0] >= 0)
-	TEMP_FAILURE_RETRY(::close(fds[0]));
+	VOID_TEMP_FAILURE_RETRY(::close(fds[0]));
       if (fds[1] >= 0)
-	TEMP_FAILURE_RETRY(::close(fds[1]));
+	VOID_TEMP_FAILURE_RETRY(::close(fds[1]));
     }
     char *copy_pipe(int *fds) {
       /* preserve original pipe contents by copying into a temporary
@@ -447,7 +451,7 @@ static uint32_t simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZE
       if (r < (ssize_t)len) {
 	bdout << "raw_pipe: error reading from temp pipe:" << cpp_strerror(r)
 	      << bendl;
-	delete data;
+	free(data);
 	data = NULL;
 	close_pipe(tmpfd);
 	throw error_code(r);
@@ -525,10 +529,10 @@ static uint32_t simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZE
 #endif
   }
 
-  buffer::raw* buffer::create_zero_copy(unsigned len, int fd, loff_t *offset) {
+  buffer::raw* buffer::create_zero_copy(unsigned len, int fd, int64_t *offset) {
 #ifdef CEPH_HAVE_SPLICE
     buffer::raw_pipe* buf = new raw_pipe(len);
-    int r = buf->set_source(fd, offset);
+    int r = buf->set_source(fd, (loff_t*)offset);
     if (r < 0) {
       delete buf;
       throw error_code(r);
@@ -664,7 +668,7 @@ static uint32_t simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZE
     return _raw->len - _len;
   }
 
-  int buffer::ptr::cmp(const ptr& o)
+  int buffer::ptr::cmp(const ptr& o) const
   {
     int l = _len < o._len ? _len : o._len;
     if (l) {
@@ -733,9 +737,9 @@ static uint32_t simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZE
     return _raw->can_zero_copy();
   }
 
-  int buffer::ptr::zero_copy_to_fd(int fd, loff_t *offset) const
+  int buffer::ptr::zero_copy_to_fd(int fd, int64_t *offset) const
   {
-    return _raw->zero_copy_to_fd(fd, offset);
+    return _raw->zero_copy_to_fd(fd, (loff_t*)offset);
   }
 
   // -- buffer::list::iterator --
@@ -1279,7 +1283,8 @@ void buffer::list::rebuild_page_aligned()
       std::string s;
       getline(in, s);
       append(s.c_str(), s.length());
-      append("\n", 1);
+      if (s.length())
+	append("\n", 1);
     }
   }
   
@@ -1368,6 +1373,9 @@ void buffer::list::rebuild_page_aligned()
   // funky modifer
   void buffer::list::splice(unsigned off, unsigned len, list *claim_by /*, bufferlist& replace_with */)
   {    // fixme?
+    if (len == 0)
+      return;
+
     if (off >= length())
       throw end_of_buffer();
 
@@ -1425,7 +1433,7 @@ void buffer::list::rebuild_page_aligned()
     // splice in *replace (implement me later?)
     
     last_p = begin();  // just in case we were in the removed region.
-  };
+  }
 
   void buffer::list::write(int off, int len, std::ostream& out) const
   {
@@ -1492,7 +1500,7 @@ int buffer::list::read_file(const char *fn, std::string *error)
     oss << "bufferlist::read_file(" << fn << "): read error:"
 	<< cpp_strerror(ret);
     *error = oss.str();
-    TEMP_FAILURE_RETRY(::close(fd));
+    VOID_TEMP_FAILURE_RETRY(::close(fd));
     return ret;
   }
   else if (ret != st.st_size) {
@@ -1503,7 +1511,7 @@ int buffer::list::read_file(const char *fn, std::string *error)
     *error = oss.str();
     // not actually an error, but weird
   }
-  TEMP_FAILURE_RETRY(::close(fd));
+  VOID_TEMP_FAILURE_RETRY(::close(fd));
   return 0;
 }
 
@@ -1531,7 +1539,7 @@ int buffer::list::read_fd_zero_copy(int fd, size_t len)
   try {
     bufferptr bp = buffer::create_zero_copy(len, fd, NULL);
     append(bp);
-  } catch (buffer::error_code e) {
+  } catch (buffer::error_code &e) {
     return e.code;
   } catch (buffer::malformed_input) {
     return -EIO;
@@ -1555,7 +1563,7 @@ int buffer::list::write_file(const char *fn, int mode)
   if (ret) {
     cerr << "bufferlist::write_fd(" << fn << "): write_fd error: "
 	 << cpp_strerror(ret) << std::endl;
-    TEMP_FAILURE_RETRY(::close(fd));
+    VOID_TEMP_FAILURE_RETRY(::close(fd));
     return ret;
   }
   if (TEMP_FAILURE_RETRY(::close(fd))) {
@@ -1629,8 +1637,8 @@ int buffer::list::write_fd_zero_copy(int fd) const
   /* pass offset to each call to avoid races updating the fd seek
    * position, since the I/O may be non-blocking
    */
-  loff_t offset = ::lseek(fd, 0, SEEK_CUR);
-  loff_t *off_p = &offset;
+  int64_t offset = ::lseek(fd, 0, SEEK_CUR);
+  int64_t *off_p = &offset;
   if (offset < 0 && offset != ESPIPE)
     return (int) offset;
   if (offset == ESPIPE)
@@ -1683,6 +1691,20 @@ __u32 buffer::list::crc32c(__u32 crc) const
   }
   return crc;
 }
+
+
+/**
+ * Binary write all contents to a C++ stream
+ */
+void buffer::list::write_stream(std::ostream &out) const
+{
+  for (std::list<ptr>::const_iterator p = _buffers.begin(); p != _buffers.end(); ++p) {
+    if (p->length() > 0) {
+      out.write(p->c_str(), p->length());
+    }
+  }
+}
+
 
 void buffer::list::hexdump(std::ostream &out) const
 {

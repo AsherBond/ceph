@@ -16,10 +16,9 @@
 #ifndef CEPH_MEMSTORE_H
 #define CEPH_MEMSTORE_H
 
-#include <ext/hash_map>
-using namespace __gnu_cxx;
-
 #include "include/assert.h"
+#include "include/unordered_map.h"
+#include "include/memory.h"
 #include "common/Finisher.h"
 #include "common/RWLock.h"
 #include "ObjectStore.h"
@@ -75,10 +74,10 @@ public:
       f->close_section();
     }
   };
-  typedef std::tr1::shared_ptr<Object> ObjectRef;
+  typedef ceph::shared_ptr<Object> ObjectRef;
 
   struct Collection {
-    hash_map<ghobject_t, ObjectRef> object_hash;  ///< for lookup
+    ceph::unordered_map<ghobject_t, ObjectRef> object_hash;  ///< for lookup
     map<ghobject_t, ObjectRef> object_map;        ///< for iteration
     map<string,bufferptr> xattr;
     RWLock lock;   ///< for object_{map,hash}
@@ -89,7 +88,7 @@ public:
     // level.
 
     ObjectRef get_object(ghobject_t oid) {
-      hash_map<ghobject_t,ObjectRef>::iterator o = object_hash.find(oid);
+      ceph::unordered_map<ghobject_t,ObjectRef>::iterator o = object_hash.find(oid);
       if (o == object_hash.end())
 	return ObjectRef();
       return o->second;
@@ -126,7 +125,7 @@ public:
 
     Collection() : lock("MemStore::Collection::lock") {}
   };
-  typedef std::tr1::shared_ptr<Collection> CollectionRef;
+  typedef ceph::shared_ptr<Collection> CollectionRef;
 
 private:
   class OmapIteratorImpl : public ObjectMap::ObjectMapIteratorImpl {
@@ -175,7 +174,7 @@ private:
   };
 
 
-  hash_map<coll_t, CollectionRef> coll_map;
+  ceph::unordered_map<coll_t, CollectionRef> coll_map;
   RWLock coll_lock;    ///< rwlock to protect coll_map
   Mutex apply_lock;    ///< serialize all updates
 
@@ -208,6 +207,8 @@ private:
 		       const string& first, const string& last);
   int _omap_setheader(coll_t cid, const ghobject_t &oid, const bufferlist &bl);
 
+  int _collection_hint_expected_num_objs(coll_t cid, uint32_t pg_num,
+      uint64_t num_objs) const { return 0; }
   int _create_collection(coll_t c);
   int _destroy_collection(coll_t c);
   int _collection_add(coll_t cid, coll_t ocid, const ghobject_t& oid);
@@ -250,8 +251,11 @@ public:
   int mount();
   int umount();
 
-  int get_max_object_name_length() {
+  unsigned get_max_object_name_length() {
     return 4096;
+  }
+  unsigned get_max_attr_name_length() {
+    return 256;  // arbitrary; there is no real limit internally
   }
 
   int mkfs();
@@ -282,7 +286,7 @@ public:
     bool allow_eio = false);
   int fiemap(coll_t cid, const ghobject_t& oid, uint64_t offset, size_t len, bufferlist& bl);
   int getattr(coll_t cid, const ghobject_t& oid, const char *name, bufferptr& value);
-  int getattrs(coll_t cid, const ghobject_t& oid, map<string,bufferptr>& aset, bool user_only = false);
+  int getattrs(coll_t cid, const ghobject_t& oid, map<string,bufferptr>& aset);
 
   int list_collections(vector<coll_t>& ls);
   bool collection_exists(coll_t c);
@@ -344,7 +348,7 @@ public:
   void set_fsid(uuid_d u);
   uuid_d get_fsid();
 
-  filestore_perf_stat_t get_cur_stats();
+  objectstore_perf_stat_t get_cur_stats();
 
   int queue_transactions(
     Sequencer *osr, list<Transaction*>& tls,

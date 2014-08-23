@@ -145,8 +145,8 @@ def test_create_defaults():
     check_default_params(2, 20, RBD_FEATURE_STRIPINGV2, 1, 1 << 16)
     check_default_params(2, 20, RBD_FEATURE_STRIPINGV2, 10, 1 << 20)
     check_default_params(2, 20, RBD_FEATURE_STRIPINGV2, 10, 1 << 16)
+    check_default_params(2, 20, RBD_FEATURE_STRIPINGV2, 0, 0)
     # make sure invalid combinations of stripe unit and order are still invalid
-    check_default_params(2, 20, RBD_FEATURE_STRIPINGV2, exception=InvalidArgument)
     check_default_params(2, 22, RBD_FEATURE_STRIPINGV2, 10, 1 << 50, exception=InvalidArgument)
     check_default_params(2, 22, RBD_FEATURE_STRIPINGV2, 10, 100, exception=InvalidArgument)
     check_default_params(2, 22, RBD_FEATURE_STRIPINGV2, 0, 1, exception=InvalidArgument)
@@ -189,6 +189,16 @@ def test_open_read_only():
             RBD().remove(ioctx, IMG_NAME)
             eq(data, read)
 
+def test_open_dne():
+    for i in xrange(100):
+        assert_raises(ImageNotFound, Image, ioctx, IMG_NAME + 'dne')
+        assert_raises(ImageNotFound, Image, ioctx, IMG_NAME, 'snap')
+
+def test_open_readonly_dne():
+    for i in xrange(100):
+        assert_raises(ImageNotFound, Image, ioctx, IMG_NAME + 'dne', read_only=True)
+        assert_raises(ImageNotFound, Image, ioctx, IMG_NAME, 'snap', read_only=True)
+
 def test_remove_dne():
     assert_raises(ImageNotFound, remove_image)
 
@@ -228,6 +238,12 @@ class TestImage(object):
     def tearDown(self):
         self.image.close()
         remove_image()
+
+    def test_invalidate_cache(self):
+        self.image.write('abc', 0)
+        eq('abc', self.image.read(0, 3))
+        self.image.invalidate_cache()
+        eq('abc', self.image.read(0, 3))
 
     def test_stat(self):
         info = self.image.stat()
@@ -363,7 +379,11 @@ class TestImage(object):
         self.image.remove_snap('snap1')
 
     def test_remove_with_watcher(self):
+        data = rand_data(256)
+        self.image.write(data, 0)
         assert_raises(ImageBusy, remove_image)
+        read = self.image.read(0, 256)
+        eq(read, data)
 
     def test_rollback_to_snap(self):
         self.image.write('\0' * 256, 0)
@@ -695,11 +715,18 @@ class TestClone(object):
         parent_data = self.image.read(IMG_SIZE / 2 + 256, 256)
         eq(parent_data, '\0' * 256)
 
+    def check_children(self, expected):
+        actual = self.image.list_children()
+        # dedup for cache pools until
+        # http://tracker.ceph.com/issues/8187 is fixed
+        deduped = set([('rbd', image[1]) for image in actual])
+        eq(deduped, set(expected))
+
     def test_list_children(self):
         global ioctx
         global features
         self.image.set_snap('snap1')
-        eq(self.image.list_children(), [('rbd', 'clone')])
+        self.check_children([('rbd', 'clone')])
         self.clone.close()
         self.rbd.remove(ioctx, 'clone')
         eq(self.image.list_children(), [])
@@ -708,16 +735,16 @@ class TestClone(object):
         for i in xrange(10):
             self.rbd.clone(ioctx, IMG_NAME, 'snap1', ioctx, 'clone%d' % i, features)
             expected_children.append(('rbd', 'clone%d' % i))
-            eq(self.image.list_children(), expected_children)
+            self.check_children(expected_children)
 
         for i in xrange(10):
             self.rbd.remove(ioctx, 'clone%d' % i)
             expected_children.pop(0)
-            eq(self.image.list_children(), expected_children)
+            self.check_children(expected_children)
 
         eq(self.image.list_children(), [])
         self.rbd.clone(ioctx, IMG_NAME, 'snap1', ioctx, 'clone', features)
-        eq(self.image.list_children(), [('rbd', 'clone')])
+        self.check_children([('rbd', 'clone')])
         self.clone = Image(ioctx, 'clone')
 
     def test_flatten_errors(self):
@@ -788,3 +815,31 @@ class TestClone(object):
                 after_flatten = clone2.read(IMG_SIZE / 2, 256)
                 eq(data, after_flatten)
         self.rbd.remove(ioctx, 'clone2')
+
+    def test_flatten_multi_level(self):
+        self.clone.create_snap('snap2')
+        self.clone.protect_snap('snap2')
+        self.rbd.clone(ioctx, 'clone', 'snap2', ioctx, 'clone3', features)
+        self.clone.flatten()
+        with Image(ioctx, 'clone3') as clone3:
+            clone3.flatten()
+        self.clone.unprotect_snap('snap2')
+        self.clone.remove_snap('snap2')
+        self.rbd.remove(ioctx, 'clone3')
+
+    def test_resize_flatten_multi_level(self):
+        self.clone.create_snap('snap2')
+        self.clone.protect_snap('snap2')
+        self.rbd.clone(ioctx, 'clone', 'snap2', ioctx, 'clone3', features)
+        self.clone.resize(1)
+        orig_data = self.image.read(0, 256)
+        with Image(ioctx, 'clone3') as clone3:
+            clone3_data = clone3.read(0, 256)
+            eq(orig_data, clone3_data)
+        self.clone.flatten()
+        with Image(ioctx, 'clone3') as clone3:
+            clone3_data = clone3.read(0, 256)
+            eq(orig_data, clone3_data)
+        self.rbd.remove(ioctx, 'clone3')
+        self.clone.unprotect_snap('snap2')
+        self.clone.remove_snap('snap2')

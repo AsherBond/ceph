@@ -241,11 +241,11 @@ The procedure is as follows:
 
 #. Start the monitor(s).
 
-   For Debian/Ubuntu, use Upstart::
+   For Ubuntu, use Upstart::
 
 	sudo start ceph-mon id=node1
 
-   For CentOS/RHEL, use sysvinit::
+   For Debian/CentOS/RHEL, use sysvinit::
 
 	sudo /etc/init.d/ceph start mon.node1
 
@@ -366,17 +366,18 @@ OSDs with the long form procedure, execute the following on ``node2`` and
 #. Initialize the OSD data directory. :: 
 
 	ssh {new-osd-host}
-	sudo ceph-osd -i {osd-num} --mkfs --mkkey
+	sudo ceph-osd -i {osd-num} --mkfs --mkkey --osd-uuid [{uuid}]
 	
    The directory must be empty before you can run ``ceph-osd`` with the 
-   ``--mkkey`` option.
+   ``--mkkey`` option. In addition, the ceph-osd tool requires specification
+   of custom cluster names with the ``--cluster`` option.
 
 
 #. Register the OSD authentication key. The value of ``ceph`` for 
    ``ceph-{osd-num}`` in the path is the ``$cluster-$id``.  If your 
    cluster name differs from ``ceph``, use your cluster name instead.::
 
-	sudo ceph auth add osd.{osd-num} osd 'allow *' mon 'allow rwx' -i /var/lib/ceph/osd/ceph-{osd-num}/keyring
+	sudo ceph auth add osd.{osd-num} osd 'allow *' mon 'allow profile osd' -i /var/lib/ceph/osd/ceph-{osd-num}/keyring
 
 
 #. Add your Ceph Node to the CRUSH map. ::
@@ -409,7 +410,7 @@ OSDs with the long form procedure, execute the following on ``node2`` and
    it is not yet running. The OSD is ``down`` and ``in``. You must start 
    your new OSD before it can begin receiving data.
 
-   For Debian/Ubuntu, use Upstart::
+   For Ubuntu, use Upstart::
 
 	sudo start ceph-osd id={osd-num}
 
@@ -418,7 +419,7 @@ OSDs with the long form procedure, execute the following on ``node2`` and
 	sudo start ceph-osd id=0
 	sudo start ceph-osd id=1
 
-   For CentOS/RHEL, use sysvinit::
+   For Debian/CentOS/RHEL, use sysvinit::
 
 	sudo /etc/init.d/ceph start osd.{osd-num}
 
@@ -462,4 +463,4 @@ To add (or remove) additional Ceph OSD Daemons, see `Add/Remove OSDs`_.
 .. _Add/Remove Monitors: ../../rados/operations/add-or-rm-mons
 .. _Add/Remove OSDs: ../../rados/operations/add-or-rm-osds
 .. _Network Configuration Reference: ../../rados/configuration/network-config-ref
-.. _Monitor Config Reference - Data: ../../rados/configuration/monitor-config-ref#data
+.. _Monitor Config Reference - Data: ../../rados/configuration/mon-config-ref#data

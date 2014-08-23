@@ -18,6 +18,7 @@
 #include <boost/scoped_ptr.hpp>
 
 #include "include/encoding.h"
+#include "include/unordered_set.h"
 #include "common/bloom_filter.hpp"
 #include "common/hobject.h"
 #include "common/Formatter.h"
@@ -166,8 +167,10 @@ public:
 private:
   void reset_to_type(impl_type_t type);
 };
-WRITE_CLASS_ENCODER(HitSet);
-WRITE_CLASS_ENCODER(HitSet::Params);
+WRITE_CLASS_ENCODER(HitSet)
+WRITE_CLASS_ENCODER(HitSet::Params)
+
+typedef boost::shared_ptr<HitSet> HitSetRef;
 
 ostream& operator<<(ostream& out, const HitSet::Params& p);
 
@@ -176,7 +179,7 @@ ostream& operator<<(ostream& out, const HitSet::Params& p);
  */
 class ExplicitHashHitSet : public HitSet::Impl {
   uint64_t count;
-  hash_set<uint32_t> hits;
+  ceph::unordered_set<uint32_t> hits;
 public:
   class Params : public HitSet::Params::Impl {
   public:
@@ -234,7 +237,7 @@ public:
   void dump(Formatter *f) const {
     f->dump_unsigned("insert_count", count);
     f->open_array_section("hash_set");
-    for (hash_set<uint32_t>::const_iterator p = hits.begin(); p != hits.end(); ++p)
+    for (ceph::unordered_set<uint32_t>::const_iterator p = hits.begin(); p != hits.end(); ++p)
       f->dump_unsigned("hash", *p);
     f->close_section();
   }
@@ -253,7 +256,7 @@ WRITE_CLASS_ENCODER(ExplicitHashHitSet)
  */
 class ExplicitObjectHitSet : public HitSet::Impl {
   uint64_t count;
-  hash_set<hobject_t> hits;
+  ceph::unordered_set<hobject_t> hits;
 public:
   class Params : public HitSet::Params::Impl {
   public:
@@ -311,7 +314,7 @@ public:
   void dump(Formatter *f) const {
     f->dump_unsigned("insert_count", count);
     f->open_array_section("set");
-    for (hash_set<hobject_t>::const_iterator p = hits.begin(); p != hits.end(); ++p) {
+    for (ceph::unordered_set<hobject_t>::const_iterator p = hits.begin(); p != hits.end(); ++p) {
       f->open_object_section("object");
       p->dump(f);
       f->close_section();
@@ -366,7 +369,7 @@ public:
       return (double)fpp_micro / 1000000.0;
     }
     void set_fpp(double f) {
-      fpp_micro = (unsigned)(f * 1000000.0);
+      fpp_micro = (unsigned)(llrintl(f * (double)1000000.0));
     }
 
     void encode(bufferlist& bl) const {

@@ -56,7 +56,7 @@ def find_up_osd(app):
         raise EnvironmentError(errno.EINVAL, 'Invalid JSON back from osd dump')
     osds = [osd['osd'] for osd in osddump['osds'] if osd['up']]
     if not osds:
-        raise EnvironmentError(errno.ENOENT, 'No up OSDs found')
+        return None
     return int(osds[-1])
 
 
@@ -139,7 +139,7 @@ def api_setup(app, conf, cluster, clientname, clientid, args):
     app.ceph_sigdict = get_command_descriptions(app.ceph_cluster)
 
     osdid = find_up_osd(app)
-    if osdid:
+    if osdid is not None:
         osd_sigdict = get_command_descriptions(app.ceph_cluster,
                                                target=('osd', int(osdid)))
 
@@ -274,7 +274,7 @@ def show_human_help(prefix):
     # XXX There ought to be a better discovery mechanism than an HTML table
     s = '<html><body><table border=1><th>Possible commands:</th><th>Method</th><th>Description</th>'
 
-    permmap = {'r':'GET', 'rw':'PUT'}
+    permmap = {'r':'GET', 'rw':'PUT', 'rx':'GET', 'rwx':'PUT'}
     line = ''
     for cmdsig in sorted(app.ceph_sigdict.itervalues(), cmp=descsort):
         concise = concise_sig(cmdsig['sig'])
@@ -361,7 +361,7 @@ def handler(catchall_path=None, fmt=None, target=None):
     Main endpoint handler; generic for every endpoint, including catchall.
     Handles the catchall, anything with <.fmt>, anything with embedded
     <target>.  Partial match or ?help cause the HTML-table
-    "show_human_help" output.  
+    "show_human_help" output.
     '''
 
     ep = catchall_path or flask.request.endpoint

@@ -14,6 +14,10 @@
 
 #include "SnapMapper.h"
 
+#define dout_subsys ceph_subsys_osd
+#undef dout_prefix
+#define dout_prefix *_dout << "snap_mapper."
+
 using std::string;
 
 const string SnapMapper::MAPPING_PREFIX = "MAP_";
@@ -65,7 +69,7 @@ struct Mapping {
     DECODE_FINISH(bl);
   }
 };
-WRITE_CLASS_ENCODER(Mapping);
+WRITE_CLASS_ENCODER(Mapping)
 
 string SnapMapper::get_prefix(snapid_t snap)
 {
@@ -80,7 +84,7 @@ string SnapMapper::get_prefix(snapid_t snap)
 string SnapMapper::to_raw_key(
   const pair<snapid_t, hobject_t> &in)
 {
-  return get_prefix(in.first) + in.second.to_str();
+  return get_prefix(in.first) + shard_prefix + in.second.to_str();
 }
 
 pair<string, bufferlist> SnapMapper::to_raw(
@@ -110,7 +114,7 @@ bool SnapMapper::is_mapping(const string &to_test)
 
 string SnapMapper::to_object_key(const hobject_t &hoid)
 {
-  return OBJECT_PREFIX + hoid.to_str();
+  return OBJECT_PREFIX + shard_prefix + hoid.to_str();
 }
 
 void SnapMapper::object_snaps::encode(bufferlist &bl) const
@@ -145,7 +149,10 @@ int SnapMapper::get_snaps(
   if (out) {
     bufferlist::iterator bp = got.begin()->second.begin();
     ::decode(*out, bp);
+    dout(20) << __func__ << " " << oid << " " << out->snaps << dendl;
     assert(!out->snaps.empty());
+  } else {
+    dout(20) << __func__ << " " << oid << " (out == NULL)" << dendl;
   }
   return 0;
 }
@@ -179,6 +186,9 @@ int SnapMapper::update_snaps(
   const set<snapid_t> *old_snaps_check,
   MapCacher::Transaction<std::string, bufferlist> *t)
 {
+  dout(20) << __func__ << " " << oid << " " << new_snaps
+	   << " was " << (old_snaps_check ? *old_snaps_check : set<snapid_t>())
+	   << dendl;
   assert(check(oid));
   if (new_snaps.empty())
     return remove_oid(oid, t);
@@ -207,9 +217,10 @@ int SnapMapper::update_snaps(
 
 void SnapMapper::add_oid(
   const hobject_t &oid,
-  set<snapid_t> snaps,
+  const set<snapid_t>& snaps,
   MapCacher::Transaction<std::string, bufferlist> *t)
 {
+  dout(20) << __func__ << " " << oid << " " << snaps << dendl;
   assert(check(oid));
   {
     object_snaps out;
@@ -267,6 +278,7 @@ int SnapMapper::remove_oid(
   const hobject_t &oid,
   MapCacher::Transaction<std::string, bufferlist> *t)
 {
+  dout(20) << __func__ << " " << oid << dendl;
   assert(check(oid));
   return _remove_oid(oid, t);
 }

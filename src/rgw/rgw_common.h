@@ -30,7 +30,9 @@
 #include "rgw_acl.h"
 #include "rgw_cors.h"
 #include "rgw_quota.h"
+#include "rgw_string.h"
 #include "cls/version/cls_version_types.h"
+#include "cls/user/cls_user_types.h"
 #include "include/rados/librados.hpp"
 
 using namespace std;
@@ -69,7 +71,6 @@ using ceph::crypto::MD5;
 
 #define RGW_BUCKETS_OBJ_SUFFIX ".buckets"
 
-#define RGW_MAX_CHUNK_SIZE	(512*1024)
 #define RGW_MAX_PENDING_CHUNKS  16
 #define RGW_MAX_PUT_SIZE        (5ULL*1024*1024*1024)
 #define RGW_MIN_MULTIPART_SIZE (5ULL*1024*1024)
@@ -276,13 +277,15 @@ class XMLArgs
 class RGWConf;
 
 class RGWEnv {
-  std::map<string, string> env_map;
+  std::map<string, string, ltstr_nocase> env_map;
 public:
   RGWConf *conf; 
 
   RGWEnv();
   ~RGWEnv();
+  void init(CephContext *cct);
   void init(CephContext *cct, char **envp);
+  void set(const char *name, const char *val);
   const char *get(const char *name, const char *def_val = NULL);
   int get_int(const char *name, int def_val = 0);
   bool get_bool(const char *name, bool def_val = 0);
@@ -291,8 +294,8 @@ public:
   bool exists_prefix(const char *prefix);
 
   void remove(const char *name);
-  void set(const char *name, const char *val);
-  std::map<string, string>& get_map() { return env_map; }
+
+  std::map<string, string, ltstr_nocase>& get_map() { return env_map; }
 };
 
 class RGWConf {
@@ -323,8 +326,8 @@ class RGWAccessControlPolicy;
 class JSONObj;
 
 struct RGWAccessKey {
-  string id;
-  string key;
+  string id; // AccessKey
+  string key; // SecretKey
   string subuser;
 
   RGWAccessKey() {}
@@ -351,7 +354,7 @@ struct RGWAccessKey {
   void decode_json(JSONObj *obj);
   void decode_json(JSONObj *obj, bool swift);
 };
-WRITE_CLASS_ENCODER(RGWAccessKey);
+WRITE_CLASS_ENCODER(RGWAccessKey)
 
 struct RGWSubUser {
   string name;
@@ -377,7 +380,7 @@ struct RGWSubUser {
 
   void decode_json(JSONObj *obj);
 };
-WRITE_CLASS_ENCODER(RGWSubUser);
+WRITE_CLASS_ENCODER(RGWSubUser)
 
 class RGWUserCaps
 {
@@ -407,7 +410,7 @@ public:
 
   void decode_json(JSONObj *obj);
 };
-WRITE_CLASS_ENCODER(RGWUserCaps);
+WRITE_CLASS_ENCODER(RGWUserCaps)
 
 void encode_json(const char *name, const obj_version& v, Formatter *f);
 void encode_json(const char *name, const RGWUserCaps& val, Formatter *f);
@@ -431,11 +434,13 @@ struct RGWUserInfo
   string default_placement;
   list<string> placement_tags;
   RGWQuotaInfo bucket_quota;
+  map<int, string> temp_url_keys;
+  RGWQuotaInfo user_quota;
 
   RGWUserInfo() : auid(0), suspended(0), max_buckets(RGW_DEFAULT_MAX_BUCKETS), op_mask(RGW_OP_TYPE_ALL), system(0) {}
 
   void encode(bufferlist& bl) const {
-     ENCODE_START(14, 9, bl);
+     ENCODE_START(16, 9, bl);
      ::encode(auid, bl);
      string access_key;
      string secret_key;
@@ -471,10 +476,12 @@ struct RGWUserInfo
      ::encode(default_placement, bl);
      ::encode(placement_tags, bl);
      ::encode(bucket_quota, bl);
+     ::encode(temp_url_keys, bl);
+     ::encode(user_quota, bl);
      ENCODE_FINISH(bl);
   }
   void decode(bufferlist::iterator& bl) {
-     DECODE_START_LEGACY_COMPAT_LEN_32(13, 9, 9, bl);
+     DECODE_START_LEGACY_COMPAT_LEN_32(16, 9, 9, bl);
      if (struct_v >= 2) ::decode(auid, bl);
      else auid = CEPH_AUTH_UID_DEFAULT;
      string access_key;
@@ -530,6 +537,12 @@ struct RGWUserInfo
     if (struct_v >= 14) {
       ::decode(bucket_quota, bl);
     }
+    if (struct_v >= 15) {
+     ::decode(temp_url_keys, bl);
+    }
+    if (struct_v >= 16) {
+      ::decode(user_quota, bl);
+    }
     DECODE_FINISH(bl);
   }
   void dump(Formatter *f) const;
@@ -551,6 +564,7 @@ WRITE_CLASS_ENCODER(RGWUserInfo)
 struct rgw_bucket {
   std::string name;
   std::string data_pool;
+  std::string data_extra_pool; /* if not set, then we should use data_pool instead */
   std::string index_pool;
   std::string marker;
   std::string bucket_id;
@@ -560,6 +574,14 @@ struct rgw_bucket {
                     */
 
   rgw_bucket() { }
+  rgw_bucket(const cls_user_bucket& b) {
+    name = b.name;
+    data_pool = b.data_pool;
+    data_extra_pool = b.data_extra_pool;
+    index_pool = b.index_pool;
+    marker = b.marker;
+    bucket_id = b.bucket_id;
+  }
   rgw_bucket(const char *n) : name(n) {
     assert(*n == '.'); // only rgw private buckets should be initialized without pool
     data_pool = index_pool = n;
@@ -568,25 +590,27 @@ struct rgw_bucket {
   rgw_bucket(const char *n, const char *dp, const char *ip, const char *m, const char *id, const char *h) :
     name(n), data_pool(dp), index_pool(ip), marker(m), bucket_id(id) {}
 
-  void clear() {
-    name = "";
-    data_pool = "";
-    index_pool = "";
-    marker = "";
-    bucket_id = "";
+  void convert(cls_user_bucket *b) {
+    b->name = name;
+    b->data_pool = data_pool;
+    b->data_extra_pool = data_extra_pool;
+    b->index_pool = index_pool;
+    b->marker = marker;
+    b->bucket_id = bucket_id;
   }
 
   void encode(bufferlist& bl) const {
-     ENCODE_START(6, 3, bl);
+     ENCODE_START(7, 3, bl);
     ::encode(name, bl);
     ::encode(data_pool, bl);
     ::encode(marker, bl);
     ::encode(bucket_id, bl);
     ::encode(index_pool, bl);
+    ::encode(data_extra_pool, bl);
     ENCODE_FINISH(bl);
   }
   void decode(bufferlist::iterator& bl) {
-    DECODE_START_LEGACY_COMPAT_LEN(6, 3, 3, bl);
+    DECODE_START_LEGACY_COMPAT_LEN(7, 3, 3, bl);
     ::decode(name, bl);
     ::decode(data_pool, bl);
     if (struct_v >= 2) {
@@ -606,8 +630,19 @@ struct rgw_bucket {
     } else {
       index_pool = data_pool;
     }
+    if (struct_v >= 7) {
+      ::decode(data_extra_pool, bl);
+    }
     DECODE_FINISH(bl);
   }
+
+  const string& get_data_extra_pool() {
+    if (data_extra_pool.empty()) {
+      return data_pool;
+    }
+    return data_extra_pool;
+  }
+
   void dump(Formatter *f) const;
   void decode_json(JSONObj *obj);
   static void generate_test_instances(list<rgw_bucket*>& o);
@@ -622,8 +657,19 @@ inline ostream& operator<<(ostream& out, const rgw_bucket &b) {
   out << b.name;
   if (b.name.compare(b.data_pool)) {
     out << "(@";
+    string s;
     if (!b.index_pool.empty() && b.data_pool.compare(b.index_pool))
-      out << "{i=" << b.index_pool << "}";
+      s = "i=" + b.index_pool;
+    if (!b.data_extra_pool.empty() && b.data_pool.compare(b.data_extra_pool)) {
+      if (!s.empty()) {
+        s += ",";
+      }
+      s += "e=" + b.data_extra_pool;
+    }
+    if (!s.empty()) {
+      out << "{"  << s << "}";
+    }
+
     out << b.data_pool << "[" << b.marker << "])";
   }
   return out;
@@ -656,6 +702,11 @@ struct RGWObjVersionTracker {
 
   void apply_write() {
     read_version = write_version;
+    write_version = obj_version();
+  }
+
+  void clear() {
+    read_version = obj_version();
     write_version = obj_version();
   }
 
@@ -768,14 +819,14 @@ struct RGWBucketEntryPoint
 };
 WRITE_CLASS_ENCODER(RGWBucketEntryPoint)
 
-struct RGWBucketStats
+struct RGWStorageStats
 {
   RGWObjCategory category;
   uint64_t num_kb;
   uint64_t num_kb_rounded;
   uint64_t num_objects;
 
-  RGWBucketStats() : num_kb(0), num_kb_rounded(0), num_objects(0) {}
+  RGWStorageStats() : category(RGW_OBJ_CATEGORY_NONE), num_kb(0), num_kb_rounded(0), num_objects(0) {}
 };
 
 struct req_state;
@@ -812,7 +863,7 @@ struct req_state {
    string decoded_uri;
    string relative_uri;
    const char *length;
-   uint64_t content_length;
+   int64_t content_length;
    map<string, string> generic_attrs;
    struct rgw_err err;
    bool expect_cont;
@@ -901,6 +952,22 @@ struct RGWBucketEnt {
 
   RGWBucketEnt() : size(0), size_rounded(0), creation_time(0), count(0) {}
 
+  RGWBucketEnt(const cls_user_bucket_entry& e) {
+    bucket = e.bucket;
+    size = e.size;
+    size_rounded = e.size_rounded;
+    creation_time = e.creation_time;
+    count = e.count;
+  }
+
+  void convert(cls_user_bucket_entry *b) {
+    bucket.convert(&b->bucket);
+    b->size = size;
+    b->size_rounded = size_rounded;
+    b->creation_time = creation_time;
+    b->count = count;
+  }
+
   void encode(bufferlist& bl) const {
     ENCODE_START(5, 5, bl);
     uint64_t s = size;
@@ -948,23 +1015,25 @@ public:
   std::string ns;
   std::string object;
 
-  rgw_obj() {}
-  rgw_obj(const char *b, const char *o) {
+  bool in_extra_data; /* in-memory only member, does not serialize */
+
+  rgw_obj() : in_extra_data(false) {}
+  rgw_obj(const char *b, const char *o) : in_extra_data(false) {
     rgw_bucket _b(b);
     std::string _o(o);
     init(_b, _o);
   }
-  rgw_obj(rgw_bucket& b, const char *o) {
+  rgw_obj(rgw_bucket& b, const char *o) : in_extra_data(false) {
     std::string _o(o);
     init(b, _o);
   }
-  rgw_obj(rgw_bucket& b, const std::string& o) {
+  rgw_obj(rgw_bucket& b, const std::string& o) : in_extra_data(false) {
     init(b, o);
   }
-  rgw_obj(rgw_bucket& b, const std::string& o, const std::string& k) {
+  rgw_obj(rgw_bucket& b, const std::string& o, const std::string& k) : in_extra_data(false) {
     init(b, o, k);
   }
-  rgw_obj(rgw_bucket& b, const std::string& o, const std::string& k, const std::string& n) {
+  rgw_obj(rgw_bucket& b, const std::string& o, const std::string& k, const std::string& n) : in_extra_data(false) {
     init(b, o, k, n);
   }
   void init(rgw_bucket& b, const std::string& o, const std::string& k, const std::string& n) {
@@ -1014,10 +1083,13 @@ public:
   }
 
   void set_obj(const string& o) {
+    object.reserve(128);
+
     orig_obj = o;
     if (ns.empty()) {
-      if (o.empty())
+      if (o.empty()) {
         return;
+      }
       if (o.size() < 1 || o[0] != '_') {
         object = o;
         return;
@@ -1108,6 +1180,14 @@ public:
     return true;
   }
 
+  void set_in_extra_data(bool val) {
+    in_extra_data = val;
+  }
+
+  bool is_in_extra_data() const {
+    return in_extra_data;
+  }
+
   void encode(bufferlist& bl) const {
     ENCODE_START(3, 3, bl);
     ::encode(bucket.name, bl);
@@ -1148,6 +1228,13 @@ public:
   }
 };
 WRITE_CLASS_ENCODER(rgw_obj)
+
+struct rgw_cache_entry_info {
+  string cache_locator;
+  uint64_t gen;
+
+  rgw_cache_entry_info() : gen(0) {}
+};
 
 inline ostream& operator<<(ostream& out, const rgw_obj &o) {
   return out << o.bucket.name << ":" << o.object;
@@ -1240,6 +1327,11 @@ static inline const char *rgw_obj_category_name(RGWObjCategory category)
 static inline uint64_t rgw_rounded_kb(uint64_t bytes)
 {
   return (bytes + 1023) / 1024;
+}
+
+static inline uint64_t rgw_rounded_objsize_kb(uint64_t bytes)
+{
+  return ((bytes + 4095) & ~4095) / 1024;
 }
 
 extern string rgw_string_unquote(const string& s);

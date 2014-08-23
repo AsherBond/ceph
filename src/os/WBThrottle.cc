@@ -10,7 +10,7 @@ WBThrottle::WBThrottle(CephContext *cct) :
   cur_ios(0), cur_size(0),
   cct(cct),
   logger(NULL),
-  stopping(false),
+  stopping(true),
   lock("WBThrottle::lock", false, true, false, cct),
   fs(XFS)
 {
@@ -34,20 +34,33 @@ WBThrottle::WBThrottle(CephContext *cct) :
     logger->set(i, 0);
 
   cct->_conf->add_observer(this);
-  create();
 }
 
 WBThrottle::~WBThrottle() {
   assert(cct);
+  cct->get_perfcounters_collection()->remove(logger);
+  delete logger;
+  cct->_conf->remove_observer(this);
+}
+
+void WBThrottle::start()
+{
+  {
+    Mutex::Locker l(lock);
+    stopping = false;
+  }
+  create();
+}
+
+void WBThrottle::stop()
+{
   {
     Mutex::Locker l(lock);
     stopping = true;
     cond.Signal();
   }
+
   join();
-  cct->get_perfcounters_collection()->remove(logger);
-  delete logger;
-  cct->_conf->remove_observer(this);
 }
 
 const char** WBThrottle::get_tracked_conf_keys() const
@@ -229,7 +242,10 @@ void WBThrottle::clear_object(const ghobject_t &hoid)
     return;
 
   cur_ios -= i->second.first.ios;
+  logger->dec(l_wbthrottle_ios_dirtied, i->second.first.ios);
   cur_size -= i->second.first.size;
+  logger->dec(l_wbthrottle_bytes_dirtied, i->second.first.size);
+  logger->dec(l_wbthrottle_inodes_dirtied);
 
   pending_wbs.erase(i);
   remove_object(hoid);

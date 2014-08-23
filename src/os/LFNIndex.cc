@@ -61,12 +61,19 @@ void LFNIndex::maybe_inject_failure()
   }
 }
 
+// Helper to close fd's when we leave scope.  This is useful when used
+// in combination with RetryException, thrown by the above.
+struct FDCloser {
+  int fd;
+  FDCloser(int f) : fd(f) {}
+  ~FDCloser() {
+    VOID_TEMP_FAILURE_RETRY(::close(fd));
+  }
+};
+
+
 /* Public methods */
 
-void LFNIndex::set_ref(std::tr1::shared_ptr<CollectionIndex> ref)
-{
-  self_ref = ref;
-}
 
 int LFNIndex::init()
 {
@@ -131,7 +138,7 @@ int LFNIndex::lookup(const ghobject_t &oid,
   } else {
     *exist = 1;
   }
-  *out_path = IndexedPath(new Path(full_path, self_ref));
+  *out_path = IndexedPath(new Path(full_path, this));
   r = 0;
   );
 }
@@ -139,6 +146,11 @@ int LFNIndex::lookup(const ghobject_t &oid,
 int LFNIndex::collection_list(vector<ghobject_t> *ls)
 {
   return _collection_list(ls);
+}
+
+int LFNIndex::pre_hash_collection(uint32_t pg_num, uint64_t expected_num_objs)
+{
+  return _pre_hash_collection(pg_num, expected_num_objs);
 }
 
 
@@ -160,9 +172,9 @@ int LFNIndex::fsync_dir(const vector<string> &path)
   int fd = ::open(get_full_path_subdir(path).c_str(), O_RDONLY);
   if (fd < 0)
     return -errno;
+  FDCloser f(fd);
   maybe_inject_failure();
   int r = ::fsync(fd);
-  TEMP_FAILURE_RETRY(::close(fd));
   maybe_inject_failure();
   if (r < 0)
     return -errno;
@@ -661,8 +673,8 @@ string LFNIndex::lfn_generate_object_name(const ghobject_t &oid)
     t += snprintf(t, end - t, "%llx", (long long unsigned)oid.hobj.pool);
   full_name += string(buf);
 
-  if (oid.generation != ghobject_t::NO_GEN) {
-    assert(oid.shard_id != ghobject_t::NO_SHARD);
+  if (oid.generation != ghobject_t::NO_GEN ||
+      oid.shard_id != shard_id_t::NO_SHARD) {
     full_name.append("_");
 
     t = buf;
@@ -753,7 +765,8 @@ int LFNIndex::lfn_get_name(const vector<string> &path,
   for ( ; ; ++i) {
     candidate = lfn_get_short_name(oid, i);
     candidate_path = get_full_path(path, candidate);
-    r = chain_getxattr(candidate_path.c_str(), get_lfn_attr().c_str(), buf, sizeof(buf));
+    r = chain_getxattr(candidate_path.c_str(), get_lfn_attr().c_str(),
+		       buf, sizeof(buf));
     if (r < 0) {
       if (errno != ENODATA && errno != ENOENT)
 	return -errno;
@@ -784,6 +797,38 @@ int LFNIndex::lfn_get_name(const vector<string> &path,
 	*exists = 1;
       return 0;
     }
+    r = chain_getxattr(candidate_path.c_str(), get_alt_lfn_attr().c_str(),
+		       buf, sizeof(buf));
+    if (r > 0) {
+      // only consider alt name if nlink > 1
+      struct stat st;
+      int rc = ::stat(candidate_path.c_str(), &st);
+      if (rc < 0)
+	return -errno;
+      if (st.st_nlink <= 1) {
+	// left over from incomplete unlink, remove
+	maybe_inject_failure();
+	dout(20) << __func__ << " found extra alt attr for " << candidate_path
+		 << ", long name " << string(buf, r) << dendl;
+	rc = chain_removexattr(candidate_path.c_str(),
+			       get_alt_lfn_attr().c_str());
+	maybe_inject_failure();
+	if (rc < 0)
+	  return rc;
+	continue;
+      }
+      buf[MIN((int)sizeof(buf) - 1, r)] = '\0';
+      if (!strcmp(buf, full_name.c_str())) {
+	dout(20) << __func__ << " used alt attr for " << full_name << dendl;
+	if (mangled_name)
+	  *mangled_name = candidate;
+	if (out_path)
+	  *out_path = candidate_path;
+	if (exists)
+	  *exists = 1;
+	return 0;
+      }
+    }
   }
   assert(0); // Unreachable
   return 0;
@@ -798,7 +843,24 @@ int LFNIndex::lfn_created(const vector<string> &path,
   string full_path = get_full_path(path, mangled_name);
   string full_name = lfn_generate_object_name(oid);
   maybe_inject_failure();
-  return chain_setxattr(full_path.c_str(), get_lfn_attr().c_str(), 
+
+  // if the main attr exists and is different, move it to the alt attr.
+  char buf[FILENAME_MAX_LEN + 1];
+  int r = chain_getxattr(full_path.c_str(), get_lfn_attr().c_str(),
+			 buf, sizeof(buf));
+  if (r >= 0 && (r != (int)full_name.length() ||
+		 memcmp(buf, full_name.c_str(), full_name.length()))) {
+    dout(20) << __func__ << " " << mangled_name
+	     << " moving old name to alt attr "
+	     << string(buf, r)
+	     << ", new name is " << full_name << dendl;
+    r = chain_setxattr(full_path.c_str(), get_alt_lfn_attr().c_str(),
+		       buf, r);
+    if (r < 0)
+      return r;
+  }
+
+  return chain_setxattr(full_path.c_str(), get_lfn_attr().c_str(),
 		     full_name.c_str(), full_name.size());
 }
 
@@ -839,26 +901,35 @@ int LFNIndex::lfn_unlink(const vector<string> &path,
       }
     }
   }
+  string full_path = get_full_path(path, mangled_name);
+  int fd = ::open(full_path.c_str(), O_RDONLY);
+  if (fd < 0)
+    return -errno;
+  FDCloser f(fd);
   if (i == removed_index + 1) {
-    string full_path = get_full_path(path, mangled_name);
     maybe_inject_failure();
     int r = ::unlink(full_path.c_str());
     maybe_inject_failure();
     if (r < 0)
       return -errno;
-    else
-      return 0;
   } else {
-    string rename_to = get_full_path(path, mangled_name);
+    string& rename_to = full_path;
     string rename_from = get_full_path(path, lfn_get_short_name(oid, i - 1));
     maybe_inject_failure();
     int r = ::rename(rename_from.c_str(), rename_to.c_str());
     maybe_inject_failure();
     if (r < 0)
       return -errno;
-    else
-      return 0;
   }
+  struct stat st;
+  int r = ::fstat(fd, &st);
+  if (r == 0 && st.st_nlink > 0) {
+    // remove alt attr
+    dout(20) << __func__ << " removing alt attr from " << full_path << dendl;
+    fsync_dir(path);
+    chain_fremovexattr(fd, get_alt_lfn_attr().c_str());
+  }
+  return r;
 }
 
 int LFNIndex::lfn_translate(const vector<string> &path,
@@ -950,9 +1021,9 @@ bool LFNIndex::lfn_parse_object_name_keyless(const string &long_name, ghobject_t
 {
   bool r = parse_object(long_name.c_str(), *out);
   int64_t pool = -1;
-  pg_t pg;
+  spg_t pg;
   if (coll().is_pg_prefix(pg))
-    pool = (int64_t)pg.pool();
+    pool = (int64_t)pg.pgid.pool();
   out->hobj.pool = pool;
   if (!r) return r;
   string temp = lfn_generate_object_name(*out);
@@ -1043,9 +1114,9 @@ bool LFNIndex::lfn_parse_object_name_poolless(const string &long_name,
 
 
   int64_t pool = -1;
-  pg_t pg;
+  spg_t pg;
   if (coll().is_pg_prefix(pg))
-    pool = (int64_t)pg.pool();
+    pool = (int64_t)pg.pgid.pool();
   (*out) = ghobject_t(hobject_t(name, key, snap, hash, pool, ""));
   return true;
 }
@@ -1060,7 +1131,7 @@ bool LFNIndex::lfn_parse_object_name(const string &long_name, ghobject_t *out)
   snapid_t snap;
   uint64_t pool;
   gen_t generation = ghobject_t::NO_GEN;
-  shard_t shard_id = ghobject_t::NO_SHARD;
+  shard_id_t shard_id = shard_id_t::NO_SHARD;
 
   if (index_version == HASH_INDEX_TAG)
     return lfn_parse_object_name_keyless(long_name, out);
@@ -1137,7 +1208,7 @@ bool LFNIndex::lfn_parse_object_name(const string &long_name, ghobject_t *out)
       return false;
     shardstring = string(current, end);
 
-    shard_id = (shard_t)strtoul(shardstring.c_str(), NULL, 16);
+    shard_id = (shard_id_t)strtoul(shardstring.c_str(), NULL, 16);
   }
 
   if (snap_str == "head")

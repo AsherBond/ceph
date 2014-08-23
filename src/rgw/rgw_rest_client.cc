@@ -1,3 +1,6 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+
 #include "rgw_common.h"
 #include "rgw_rest_client.h"
 #include "rgw_auth_s3.h"
@@ -89,7 +92,7 @@ int RGWRESTSimpleRequest::execute(RGWAccessKey& key, const char *method, const c
 
   string date_str;
   get_new_date_str(cct, date_str);
-  headers.push_back(make_pair<string, string>("HTTP_DATE", date_str));
+  headers.push_back(pair<string, string>("HTTP_DATE", date_str));
 
   string canonical_header;
   map<string, string> meta_map;
@@ -108,7 +111,7 @@ int RGWRESTSimpleRequest::execute(RGWAccessKey& key, const char *method, const c
 
   ldout(cct, 15) << "generated auth header: " << auth_hdr << dendl;
 
-  headers.push_back(make_pair<string, string>("AUTHORIZATION", auth_hdr));
+  headers.push_back(pair<string, string>("AUTHORIZATION", auth_hdr));
   int r = process(method, new_url.c_str());
   if (r < 0)
     return r;
@@ -171,7 +174,7 @@ void RGWRESTSimpleRequest::get_params_str(map<string, string>& extra_args, strin
 
 int RGWRESTSimpleRequest::sign_request(RGWAccessKey& key, RGWEnv& env, req_info& info)
 {
-  map<string, string>& m = env.get_map();
+  map<string, string, ltstr_nocase>& m = env.get_map();
 
   map<string, string>::iterator i;
   for (i = m.begin(); i != m.end(); ++i) {
@@ -218,15 +221,15 @@ int RGWRESTSimpleRequest::forward_request(RGWAccessKey& key, req_info& info, siz
     return ret;
   }
 
-  map<string, string>& m = new_env.get_map();
+  map<string, string, ltstr_nocase>& m = new_env.get_map();
   map<string, string>::iterator iter;
   for (iter = m.begin(); iter != m.end(); ++iter) {
-    headers.push_back(make_pair<string, string>(iter->first, iter->second));
+    headers.push_back(pair<string, string>(iter->first, iter->second));
   }
 
   map<string, string>& meta_map = new_info.x_meta_map;
   for (iter = meta_map.begin(); iter != meta_map.end(); ++iter) {
-    headers.push_back(make_pair<string, string>(iter->first, iter->second));
+    headers.push_back(pair<string, string>(iter->first, iter->second));
   }
 
   string params_str;
@@ -364,7 +367,7 @@ static void grants_by_type_add_perm(map<int, string>& grants_by_type, int perm, 
   }
 }
 
-static void add_grants_headers(map<int, string>& grants, map<string, string>& attrs, map<string, string>& meta_map)
+static void add_grants_headers(map<int, string>& grants, map<string, string, ltstr_nocase>& attrs, map<string, string>& meta_map)
 {
   struct grant_type_to_header *t;
 
@@ -405,7 +408,7 @@ int RGWRESTStreamWriteRequest::put_obj_init(RGWAccessKey& key, rgw_obj& obj, uin
   new_info.request_uri = new_info.script_uri;
   new_info.effective_uri = new_info.effective_uri;
 
-  map<string, string>& m = new_env.get_map();
+  map<string, string, ltstr_nocase>& m = new_env.get_map();
   map<string, bufferlist>::iterator bliter;
 
   /* merge send headers */
@@ -446,7 +449,7 @@ int RGWRESTStreamWriteRequest::put_obj_init(RGWAccessKey& key, rgw_obj& obj, uin
 
   map<string, string>::iterator iter;
   for (iter = m.begin(); iter != m.end(); ++iter) {
-    headers.push_back(make_pair<string, string>(iter->first, iter->second));
+    headers.push_back(pair<string, string>(iter->first, iter->second));
   }
 
   cb = new RGWRESTStreamOutCB(this);
@@ -582,10 +585,10 @@ int RGWRESTStreamReadRequest::get_obj(RGWAccessKey& key, map<string, string>& ex
     return ret;
   }
 
-  map<string, string>& m = new_env.get_map();
+  map<string, string, ltstr_nocase>& m = new_env.get_map();
   map<string, string>::iterator iter;
   for (iter = m.begin(); iter != m.end(); ++iter) {
-    headers.push_back(make_pair<string, string>(iter->first, iter->second));
+    headers.push_back(pair<string, string>(iter->first, iter->second));
   }
 
   int r = process(new_info.method, new_url.c_str());

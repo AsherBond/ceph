@@ -624,7 +624,7 @@ TEST(TestRGWAdmin, opstate_set_list_delete) {
     EXPECT_TRUE((*it).object.compare(obj_1) == 0);
     EXPECT_EQ((*it).state, (uint32_t)RGWOpState::OPSTATE_COMPLETE);
 
-    it++;
+    ++it;
     EXPECT_TRUE((*it).client_id.compare(cid_2) == 0);
     EXPECT_TRUE((*it).op_id.compare(oid_2) == 0);
     EXPECT_TRUE((*it).object.compare(obj_2) == 0);
@@ -809,7 +809,7 @@ int main(int argc, char *argv[]){
 
   global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY, 0);
   common_init_finish(g_ceph_context);
-  store = RGWStoreManager::get_storage(g_ceph_context, false);
+  store = RGWStoreManager::get_storage(g_ceph_context, false, false);
   g_test = new admin_log::test_helper();
   finisher = new Finisher(g_ceph_context);
 #ifdef GTEST

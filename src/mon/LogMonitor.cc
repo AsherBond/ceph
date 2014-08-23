@@ -45,7 +45,7 @@ ostream& operator<<(ostream& out, LogMonitor& pm)
 {
   /*
   std::stringstream ss;
-  for (hash_map<int,int>::iterator p = pm.pg_map.num_pg_by_state.begin();
+  for (ceph::unordered_map<int,int>::iterator p = pm.pg_map.num_pg_by_state.begin();
        p != pm.pg_map.num_pg_by_state.end();
        ++p) {
     if (p != pm.pg_map.num_pg_by_state.begin())
@@ -163,7 +163,7 @@ void LogMonitor::update_from_paxos(bool *need_bootstrap)
 	dout(1) << "error writing to " << g_conf->mon_cluster_log_file
 		<< ": " << cpp_strerror(err) << dendl;
       }
-      TEMP_FAILURE_RETRY(::close(fd));
+      VOID_TEMP_FAILURE_RETRY(::close(fd));
     }
   }
 
@@ -382,7 +382,8 @@ bool LogMonitor::prepare_command(MMonCommand *m)
     le.msg = str_join(logtext, " ");
     pending_summary.add(le);
     pending_log.insert(pair<utime_t,LogEntry>(le.stamp, le));
-    wait_for_finished_proposal(new Monitor::C_Command(mon, m, 0, string(), get_last_committed()));
+    wait_for_finished_proposal(new Monitor::C_Command(mon, m, 0, string(),
+					      get_last_committed() + 1));
     return true;
   }
 
@@ -455,7 +456,7 @@ void LogMonitor::check_sub(Subscription *s)
 	  << " with " << mlog->entries.size() << " entries"
 	  << " (version " << mlog->version << ")" << dendl;
   
-  mon->messenger->send_message(mlog, s->session->inst);
+  s->session->con->send_message(mlog);
   if (s->onetime)
     mon->session_map.remove_sub(s);
   else

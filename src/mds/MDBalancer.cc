@@ -100,7 +100,8 @@ void MDBalancer::tick()
   }
 
   // hash?
-  if (g_conf->mds_bal_frag && g_conf->mds_bal_fragment_interval > 0 &&
+  if ((g_conf->mds_bal_frag || g_conf->mds_thrash_fragments) &&
+      g_conf->mds_bal_fragment_interval > 0 &&
       now.sec() - last_fragment.sec() > g_conf->mds_bal_fragment_interval) {
     last_fragment = now;
     do_fragmenting();
@@ -550,7 +551,7 @@ void MDBalancer::prep_rebalance(int beat)
 	  if (maxim <= .001) continue;
 	  try_match(ex->second, maxex,
 		    im->first, maxim);
-	  if (maxex <= .001) break;;
+	  if (maxex <= .001) break;
 	}
       }
     }
@@ -642,26 +643,12 @@ void MDBalancer::try_rebalance()
 
   // do my exports!
   set<CDir*> already_exporting;
-  double total_sent = 0;
-  double total_goal = 0;
 
   for (map<int,double>::iterator it = my_targets.begin();
        it != my_targets.end();
        ++it) {
-
-      /*
-	double fac = 1.0;
-	if (false && total_goal > 0 && total_sent > 0) {
-	fac = total_goal / total_sent;
-	dout(0) << " total sent is " << total_sent << " / " << total_goal << " -> fac 1/ " << fac << dendl;
-	if (fac > 1.0) fac = 1.0;
-	}
-	fac = .9 - .4 * ((float)g_conf->num_mds / 128.0);  // hack magic fixme
-      */
-
     int target = (*it).first;
     double amount = (*it).second;
-    total_goal += amount;
 
     if (amount < MIN_OFFLOAD) continue;
     if (amount / target_load < .2) continue;
@@ -707,7 +694,6 @@ void MDBalancer::try_rebalance()
       }
     }
     if (amount-have < MIN_OFFLOAD) {
-      total_sent += have;
       continue;
     }
 
@@ -734,7 +720,6 @@ void MDBalancer::try_rebalance()
       }
     if (amount-have < MIN_OFFLOAD) {
       //fudge = amount-have;
-      total_sent += have;
       continue;
     }
 
@@ -753,7 +738,6 @@ void MDBalancer::try_rebalance()
 	break;
     }
     //fudge = amount - have;
-    total_sent += have;
 
     for (list<CDir*>::iterator it = exports.begin(); it != exports.end(); ++it) {
       dout(0) << "   - exporting "
@@ -999,11 +983,11 @@ void MDBalancer::hit_dir(utime_t now, CDir *dir, int type, int who, double amoun
       dir->is_auth()) {
 
     dout(20) << "hit_dir " << type << " pop is " << v << ", frag " << dir->get_frag()
-	     << " size " << dir->get_num_head_items() << dendl;
+	     << " size " << dir->get_frag_size() << dendl;
 
     // split
     if (g_conf->mds_bal_split_size > 0 &&
-	((dir->get_num_head_items() > (unsigned)g_conf->mds_bal_split_size) ||
+	(dir->should_split() ||
 	 (v > g_conf->mds_bal_split_rd && type == META_POP_IRD) ||
 	 (v > g_conf->mds_bal_split_wr && type == META_POP_IWR)) &&
 	split_queue.count(dir->dirfrag()) == 0) {
@@ -1012,8 +996,7 @@ void MDBalancer::hit_dir(utime_t now, CDir *dir, int type, int who, double amoun
     }
 
     // merge?
-    if (dir->get_frag() != frag_t() &&
-	(dir->get_num_head_items() < (unsigned)g_conf->mds_bal_merge_size) &&
+    if (dir->get_frag() != frag_t() && dir->should_merge() &&
 	merge_queue.count(dir->dirfrag()) == 0) {
       dout(10) << "hit_dir " << type << " pop is " << v << ", putting in merge_queue: " << *dir << dendl;
       merge_queue.insert(dir->dirfrag());

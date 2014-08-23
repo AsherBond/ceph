@@ -8,7 +8,7 @@ AC_PREREQ(2.59)
 # VERSION define is not used by the code.  It gets a version string
 # from 'git describe'; see src/ceph_ver.[ch]
 
-AC_INIT([ceph], [0.73], [ceph-devel@vger.kernel.org])
+AC_INIT([ceph], [0.84], [ceph-devel@vger.kernel.org])
 
 # Create release string.  Used with VERSION for RPMs.
 RPM_RELEASE=0
@@ -28,6 +28,9 @@ AC_CONFIG_SUBDIRS([src/gtest])
 # Environment
 AC_CANONICAL_HOST
 AC_CANONICAL_TARGET
+
+# Fix automake problems in 1.12
+m4_ifdef([AM_PROG_AR], [AM_PROG_AR])
 
 # Automake
 AM_INIT_AUTOMAKE
@@ -88,11 +91,21 @@ if yasm -f elf64 src/common/crc32c_intel_fast_asm.S -o /dev/null; then
       echo 'we are x86_64'
       AC_DEFINE([HAVE_GOOD_YASM_ELF64], [1], [we have a recent yasm and are x86_64])
       with_good_yasm=yes
+
+      if yasm -f elf64 -i src/ceph/src/ceph/src/erasure-code/isa/isa-l/include/ src/erasure-code/isa/isa-l/erasure_code/gf_vect_dot_prod_avx2.asm.s -o /dev/null 2> /dev/null ; then
+         echo 'yasm can also build the isa-l stuff'
+	 with_better_yasm=yes
+      else
+         echo "yasm doesn't build the isa-l stuff"
+      fi
    fi
 else
    echo 'we do not have a modern/working yasm'
 fi
 AM_CONDITIONAL(WITH_GOOD_YASM_ELF64, test "$with_good_yasm" = "yes")
+AM_CONDITIONAL(WITH_BETTER_YASM_ELF64, test "$with_better_yasm" = "yes")
+
+# check for better yasm
 
 # Checks for compiler warning types
 
@@ -131,8 +144,19 @@ ACX_PTHREAD
 
 AC_CHECK_LIB([uuid], [uuid_parse], [true], AC_MSG_FAILURE([libuuid not found]))
 
+# rbd {map,unmap,showmapped} dependencies, Linux only
 if test x"$linux" = x"yes"; then
-  AC_CHECK_LIB([blkid], [blkid_devno_to_wholedisk], [true], AC_MSG_FAILURE([libblkid not found]))
+  # libblkid
+  AC_CHECK_HEADER([blkid/blkid.h], [],
+    AC_MSG_ERROR([blkid/blkid.h not found (libblkid-dev, libblkid-devel)]))
+  AC_CHECK_LIB([blkid], [blkid_devno_to_wholedisk], [true],
+    AC_MSG_FAILURE([libblkid not found]))
+
+  # libudev
+  AC_CHECK_HEADER([libudev.h], [],
+    AC_MSG_ERROR([libudev.h not found (libudev-dev, libudev-devel)]))
+  AC_CHECK_LIB([udev], [udev_monitor_receive_device], [true],
+    AC_MSG_FAILURE([libudev not found]))
 fi
 
 #
@@ -168,10 +192,14 @@ if test x"$resolv_libs" != "xok"; then
 fi
 AC_SUBST([RESOLV_LIBS])
 
+dnl check for libkeyutils on linux
+KEYUTILS_LIB=""
+AS_IF([test x"$linux" = x"yes"], [
+  AC_CHECK_LIB([keyutils], [add_key], [KEYUTILS_LIB="-lkeyutils"], [
+    AC_MSG_FAILURE([libkeyutils not found])])])
+AC_SUBST(KEYUTILS_LIB)
+
 AC_CHECK_LIB([m], [pow], [true], AC_MSG_FAILURE([libm not found]))
-if test x"$linux" = x"yes"; then
-	AC_CHECK_LIB([keyutils], [add_key], [true], AC_MSG_FAILURE([libkeyutils not found]))
-fi
 AC_CHECK_FUNCS([syncfs], AC_DEFINE([HAVE_SYS_SYNCFS], [1], [we have syncfs]), [])
 
 # Find some crypto library for us to use, while letting user to decide which one to use.
@@ -385,7 +413,7 @@ if test "x$enable_cephfs_java" = "xyes"; then
 	# setup defaults for Debian default-jdk package (without --with-jdk-dir)
 	AS_IF([test -z "$with_jdk_dir"], [
 		   # This works with Debian's and CentOS' default-jdk package
-       for dir in '/usr/lib/jvm/default-java/' '/usr/lib/jvm/java/' ; do
+       for dir in '/usr/lib/jvm/default-java/' '/usr/lib/jvm/java/' '/usr/lib/jvm/java-gcj/'; do
           # only test if a suitable path has not yet been found
           AS_IF([test "$EXTRA_JDK_BIN_DIR" == ""], [
 		          AS_IF([test -x "$javac_prog"], [
@@ -465,8 +493,13 @@ AS_IF([test "x$with_libatomic_ops" != xno],
                    [no libatomic-ops found (use --without-libatomic-ops to disable)])
               ])])
 AS_IF([test "$HAVE_ATOMIC_OPS" = "1"],
-	[],
+	[
+         AC_CHECK_SIZEOF(AO_t, [], [
+                                #include <atomic_ops.h>
+                                ])
+         ],
 	[AC_DEFINE([NO_ATOMIC_OPS], [1], [Defined if you do not have atomic_ops])])
+
 
 AM_CONDITIONAL(WITH_LIBATOMIC, [test "$HAVE_ATOMIC_OPS" = "1"])
 
@@ -483,13 +516,57 @@ AC_ARG_WITH([ocf],
 AM_CONDITIONAL(WITH_OCF, [ test "$with_ocf" = "yes" ])
 
 # check is snappy-devel is installed, needed by leveldb
-AC_CHECK_LIB([snappy], [snappy_compress], [], [AC_MSG_FAILURE([libsnappy not found])])
+AC_CHECK_LIB([snappy], [snappy_compress], [true], [AC_MSG_FAILURE([libsnappy not found])])
 # use system leveldb
-AC_CHECK_LIB([leveldb], [leveldb_open], [], [AC_MSG_FAILURE([libleveldb not found])], [-lsnappy -lpthread])
+AC_CHECK_LIB([leveldb], [leveldb_open], [true], [AC_MSG_FAILURE([libleveldb not found])], [-lsnappy -lpthread])
 # see if we can use bloom filters with leveldb
 AC_LANG_PUSH([C++])
 AC_CHECK_HEADER([leveldb/filter_policy.h], [AC_DEFINE([HAVE_LEVELDB_FILTER_POLICY], [1], [Defined if LevelDB supports bloom filters ])])
 AC_LANG_POP([C++])
+
+# Find supported SIMD / SSE extensions supported by the compiler
+AX_INTEL_FEATURES()
+
+# kinetic osd backend?
+AC_ARG_WITH([kinetic],
+            [AS_HELP_STRING([--with-kinetic], [build kinetic support])],
+            [],
+            [with_kinetic=no])
+# no pkg-config support yet
+#AS_IF([test "x$with_kinetic" = "xyes"],
+#            [PKG_CHECK_MODULES([KINETIC], [kinetic_client], [], [true])])
+AS_IF([test "x$with_kinetic" = "xyes"],
+            [AC_DEFINE([HAVE_KINETIC], [1], [Defined if you have kinetic enabled])])
+AM_CONDITIONAL(WITH_KINETIC, [ test "$with_kinetic" = "yes" ])
+
+# check for c++11 (but do not enable it)
+old_cxxflags="$CXXFLAGS"
+AX_CXX_COMPILE_STDCXX_11([], [optional])
+CXXFLAGS="$old_cxxflags"
+
+# use rocksdb
+AC_ARG_WITH([librocksdb],
+            [AS_HELP_STRING([--with-librocksdb], [build rocksdb support])],
+            [],
+            [with_librocksdb=no])
+AS_IF([test "x$with_librocksdb" = "xyes"],
+            [PKG_CHECK_MODULES([LIBROCKSDB], [rocksdb], [], [true])])
+AS_IF([test "x$with_librocksdb" = "xyes"],
+            [AC_DEFINE([HAVE_LIBROCKSDB], [1], [Defined if you have librocksdb enabled])])
+AM_CONDITIONAL(WITH_DLIBROCKSDB, [ test "$with_librocksdb" = "yes" ])
+
+AC_ARG_WITH([librocksdb-static],
+            [AS_HELP_STRING([--with-librocksdb-static], [build rocksdb support])],
+            [],
+            [with_librocksdb_static=no])
+AS_IF([test "x$with_librocksdb_static" = "xcheck" -a "x$HAVE_CXX11" = "x1" ],
+            [with_librocksdb_static="yes"])
+AS_IF([test "x$with_librocksdb_static" = "xyes"],
+            [AC_CONFIG_SUBDIRS([src/rocksdb])])
+AS_IF([test "x$with_librocksdb_static" = "xyes"],
+            [AC_DEFINE([HAVE_LIBROCKSDB], [1], [Defined if you have librocksdb enabled])])
+AM_CONDITIONAL(WITH_SLIBROCKSDB, [ test "x$with_librocksdb_static" = "xyes" ])
+AM_CONDITIONAL(WITH_LIBROCKSDB, [ test "x$with_librocksdb_static" = "xyes" -o "x$with_librocksdb" = "xyes" ])
 
 # use system libs3?
 AC_ARG_WITH([system-libs3],
@@ -521,6 +598,31 @@ AS_IF([test "x$with_libaio" != xno],
 AS_IF([test "$with_libaio" = "yes"],
 	    [AC_DEFINE([HAVE_LIBAIO], [1], [Defined if you don't have atomic_ops])])
 AM_CONDITIONAL(WITH_LIBAIO, [ test "$with_libaio" = "yes" ])
+
+# use libxfs?
+AC_ARG_WITH([libxfs],
+  [AS_HELP_STRING([--without-libxfs], [disable libxfs use by FileStore])],
+  [],
+  [with_libxfs=yes])
+AS_IF([test "x$with_libxfs" != "xno"], [
+  # xfs/xfs.h presence and XFS_XFLAG_EXTSIZE define
+  AC_CHECK_HEADER([xfs/xfs.h], [], AC_MSG_ERROR(
+    [xfs/xfs.h not found (--without-libxfs to disable)]))
+  AC_MSG_CHECKING([for XFS_XFLAG_EXTSIZE in xfs/xfs.h])
+  AC_EGREP_CPP([yes_have_xfs_xflag_extsize], [
+    #include <xfs/xfs.h>
+    #ifdef XFS_XFLAG_EXTSIZE
+    yes_have_xfs_xflag_extsize
+    #endif
+  ], [
+    AC_MSG_RESULT([yes])
+    AC_DEFINE([HAVE_LIBXFS], [1], [Define to 1 if you have libxfs])
+  ], [
+    AC_MSG_RESULT([no])
+    AC_MSG_ERROR([XFS_XFLAG_EXTSIZE not found (--without-libxfs to disable)])
+  ])
+])
+AM_CONDITIONAL(WITH_LIBXFS, [test "x$with_libxfs" != "xno"])
 
 # use libzfs
 AC_ARG_WITH([libzfs],
@@ -563,9 +665,15 @@ AC_CHECK_LIB(boost_system-mt, main, [],
         AC_MSG_NOTICE(["Boost system library not found."]))])
 
 # Find the right boost_thread library.
+BOOST_THREAD_LIBS=""
+saved_LIBS="${LIBS}"
+LIBS=""
 AC_CHECK_LIB(boost_thread-mt, main, [],
     [AC_CHECK_LIB(boost_thread, main, [],
         AC_MSG_FAILURE(["Boost thread library not found."]))])
+BOOST_THREAD_LIBS="${LIBS}"
+LIBS="${saved_LIBS}"
+AC_SUBST(BOOST_THREAD_LIBS)
 
 #
 # Check for boost_program_options library (defines BOOST_PROGRAM_OPTIONS_LIBS).
@@ -589,6 +697,7 @@ AC_CHECK_MEMBER([struct fiemap_extent.fe_logical],
 
 AC_CHECK_HEADERS([ \
 	arpa/inet.h \
+	arpa/nameser_compat.h \
 	linux/version.h \
 	netdb.h \
 	netinet/in.h \
@@ -632,16 +741,23 @@ AC_CHECK_FUNC([splice],
 	[AC_DEFINE([CEPH_HAVE_SPLICE], [], [splice(2) is supported])],
 	[])
 
+# F_SETPIPE_SZ in fcntl.h
+AC_MSG_CHECKING([for F_SETPIPE_SZ in fcntl.h])
+AC_EGREP_CPP([yes_have_f_setpipe_sz], [
+  #define _GNU_SOURCE
+  #include <fcntl.h>
+  #ifdef F_SETPIPE_SZ
+  yes_have_f_setpipe_sz
+  #endif
+], [
+  AC_MSG_RESULT([yes])
+  AC_DEFINE([CEPH_HAVE_SETPIPE_SZ], [], [F_SETPIPE_SZ is supported])
+], [
+  AC_MSG_RESULT([no])
+  AC_MSG_NOTICE([F_SETPIPE_SZ not found, zero-copy may be less efficent])
+])
 
-AC_CHECK_HEADERS([arpa/nameser_compat.h])
-
-AC_COMPILE_IFELSE([AC_LANG_SOURCE([[#include <fcntl.h>
-F_SETPIPE_SZ]])],
-	[AC_DEFINE([CEPH_HAVE_SETPIPE_SZ], [], [F_SETPIPE_SZ is supported])],
-	[AC_MSG_NOTICE(["F_SETPIPE_SZ not found, zero-copy may be less efficent"])])
-
-
-AC_CHECK_HEADERS([arpa/nameser_compat.h])
+AC_CHECK_FUNCS([posix_fallocate])
 AC_CHECK_HEADERS([sys/prctl.h])
 AC_CHECK_FUNCS([prctl])
 AC_CHECK_FUNCS([pipe2])
@@ -662,6 +778,117 @@ AC_DEFINE([HAVE_FDATASYNC], 1, [Define to 1 if you have fdatasync.])
 ], [
 AC_MSG_RESULT([no])
 ])
+
+#
+# Check for pthread spinlock (depends on ACX_PTHREAD)
+#
+saved_LIBS="$LIBS"
+saved_CFLAGS="$CFLAGS"
+LIBS="$PTHREAD_LIBS $LIBS"
+CFLAGS="$PTHREAD_CFLAGS $CFLAGS"
+AC_CHECK_FUNC([pthread_spin_init],
+  [AC_DEFINE(HAVE_PTHREAD_SPINLOCK, 1, [Define if you have pthread_spin_init])])
+LIBS="$saved_LIBS"
+CFLAGS="$saved_CFLAGS"
+
+AC_CHECK_TYPES([int8_t, uint8_t, int16_t, uint16_t, int32_t, uint32_t,
+  int64_t, uint64_t])
+
+dnl check for Linux types
+AC_CHECK_HEADERS([linux/types.h])
+AC_CHECK_TYPES([__u8, __s8, __u16, __s16, __u32, __s32, __u64, __s64, __le16,
+  __be16, __le32, __be32, __le64, __be64], [], [], [[#include <linux/types.h>]])
+
+
+dnl Old versions of lttng-gen-tp leave out includes, and they break our stuff.
+AC_MSG_CHECKING([if lttng-gen-tp is sane])
+lttng_gen_tp_dir=`mktemp -d`
+echo "#include <foo-inc.h>" > "$lttng_gen_tp_dir/foo.tp"
+if ( ( cd "$lttng_gen_tp_dir" && lttng-gen-tp foo.tp -o foo.h && grep "#include <foo-inc.h>" foo.h ) > /dev/null 2>&1 ) ; then
+  have_good_lttng_gen_tp=yes
+else
+  have_good_lttng_gen_tp=no
+fi
+rm -rf "$lttng_gen_tp_dir"
+AC_MSG_RESULT([$have_good_lttng_gen_tp])
+
+AC_ARG_WITH([lttng],
+	[AS_HELP_STRING([--with-lttng], [Trace with LTTng])])
+AS_IF([test "x$with_lttng" = "xno"], [use_lttng=no],
+      [test "x$with_lttng" = "xyes"], [use_lttng=yes],
+      [test "x$have_good_lttng_gen_tp" = "xyes"], [use_lttng=yes; AC_MSG_NOTICE([lttng auto-enabled])],
+      [use_lttng=no; AC_MSG_NOTICE([lttng auto-disabled])])
+AM_CONDITIONAL([WITH_LTTNG], test x"$use_lttng" = x"yes")
+AM_COND_IF([WITH_LTTNG], [
+  AC_DEFINE([WITH_LTTNG], [1], [Define if you want to use LTTng])
+
+  AC_CHECK_HEADER([lttng/tracepoint.h], [],
+    AC_MSG_ERROR([lttng/tracepoint.h not found (liblttng-ust-dev, lttng-ust-devel)]))
+
+  AC_CHECK_PROG([LTTNG_GEN_TP_CHECK], [lttng-gen-tp], [yes])
+  if test x"$LTTNG_GEN_TP_CHECK" != "xyes"; then
+      AC_MSG_FAILURE([lttng-gen-tp not found])
+  fi
+  AC_SUBST([LTTNG_GEN_TP_PROG], [lttng-gen-tp])
+
+  if test x"$have_good_lttng_gen_tp" != "xyes"; then
+      AC_MSG_FAILURE([lttng-gen-tp does not behave properly])
+  fi
+
+  AC_MSG_CHECKING([if time_t is an integer])
+  AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <time.h>]], [[
+      struct {
+          unsigned int time_t_is_integer: ((time_t) 1.5 == 1) ? 1 : -1;
+      } x;
+      return 0;
+  ]])], [
+     AC_MSG_RESULT([yes])
+  ], [
+     AC_MSG_RESULT([no])
+     AC_MSG_FAILURE([time_t is not an integer.  We assume this for tracing.])
+  ])
+
+  AC_MSG_CHECKING([if time_t fits in uint64_t])
+  AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <time.h>
+  #include <inttypes.h>]], [[
+      struct {
+          unsigned int time_t_fits_in_uin64_t: (sizeof(time_t) <= sizeof(uint64_t)) ? 1 : -1;
+      } x;
+      return 0;
+  ]])], [
+     AC_MSG_RESULT([yes])
+  ], [
+     AC_MSG_RESULT([no])
+     AC_MSG_FAILURE([time_t is larger than uint64_t.  We assume it can be cast to uint64_t, for tracing.])
+  ])
+], [
+  AC_DEFINE([tracepoint(...)], [], [LTTng is disabled, so define this macro to be nothing.])
+])
+
+
+AC_CHECK_HEADERS([babeltrace/ctf/events.h babeltrace/babeltrace.h])
+AC_CHECK_DECL([BT_CLOCK_REAL],
+              [have_good_babeltrace=yes],
+              [have_good_babeltrace=no],
+              [[#include <babeltrace/babeltrace.h>]])
+AC_ARG_WITH([babeltrace],
+	[AS_HELP_STRING([--with-babeltrace], [Enable Babeltrace])])
+AS_IF([test "x$with_babeltrace" = "xno"], [use_babeltrace=no],
+      [test "x$with_babeltrace" = "xyes"], [use_babeltrace=yes],
+      [test "x$ac_cv_header_babeltrace_ctf_events_h$ac_cv_header_babeltrace_babeltrace_h$have_good_babeltrace" = "xyesyesyes"], [use_babeltrace=yes; AC_MSG_NOTICE([babeltrace auto-enabled])],
+      [use_babeltrace=no; AC_MSG_NOTICE([babeltrace auto-disabled])])
+AM_CONDITIONAL([WITH_BABELTRACE], test x"$use_babeltrace" = x"yes")
+AM_COND_IF([WITH_BABELTRACE], [
+  AC_DEFINE([WITH_BABELTRACE], [1], [Define if you want to use Babeltrace])
+
+  AC_CHECK_HEADER([babeltrace/babeltrace.h], [],
+    AC_MSG_ERROR([babeltrace/babeltrac.h not found (libbabeltrace-dev, libbabeltrace-devel)]))
+
+  AC_CHECK_HEADER([babeltrace/ctf/events.h], [],
+    AC_MSG_ERROR([babeltrace/ctf/events.h not found (libbabeltrace-ctf-dev, libbabeltrace-devel)]))
+])
+
+
 
 # Checks for typedefs, structures, and compiler characteristics.
 #AC_HEADER_STDBOOL
@@ -705,6 +932,11 @@ AC_MSG_RESULT([no])
 #AC_FUNC_UTIME_NULL
 #AC_CHECK_FUNCS([bzero fchdir fdatasync floor ftruncate getcwd gethostbyname gethostname gettimeofday inet_ntoa localtime_r memmove memset mkdir munmap pow rmdir select socket sqrt strcasecmp strchr strerror strstr utime])
 
+# check for return type (and presence) if strerror_r in C++ mode
+AC_LANG_PUSH([C++])
+AC_FUNC_STRERROR_R
+AC_LANG_POP([C++])
+
 AM_CONDITIONAL(WITH_BUILD_TESTS, test "$WITH_BUILD_TESTS" = "1")
 
 AM_PATH_PYTHON([2.4],
@@ -717,6 +949,7 @@ AC_CONFIG_FILES([Makefile
 	src/ocf/ceph
 	src/ocf/rbd
 	src/java/Makefile
+	src/tracing/Makefile
 	man/Makefile
 	ceph.spec])
 AC_OUTPUT

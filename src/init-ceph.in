@@ -12,7 +12,9 @@
 # Description:       Enable Ceph distributed file system services.
 ### END INIT INFO
 
-# if we start up as ./mkcephfs, assume everything else is in the
+. /lib/lsb/init-functions
+
+# if we start up as ./init-ceph, assume everything else is in the
 # current directory too.
 if [ `dirname $0` = "." ] && [ $PWD != "/etc/init.d" ]; then
     BINDIR=.
@@ -29,6 +31,7 @@ fi
 usage_exit() {
     echo "usage: $0 [options] {start|stop|restart|condrestart} [mon|osd|mds]..."
     printf "\t-c ceph.conf\n"
+    printf "\t--cluster [cluster name]\tdefine the cluster name\n"
     printf "\t--valgrind\trun via valgrind\n"
     printf "\t--hostname [hostname]\toverride hostname lookup\n"
     exit
@@ -41,6 +44,10 @@ test -f $LIBDIR/ceph_common.sh || exit 0
 . $LIBDIR/ceph_common.sh
 
 EXIT_STATUS=0
+
+# detect systemd
+SYSTEMD=0
+grep -qs systemd /proc/1/comm && SYSTEMD=1
 
 signal_daemon() {
     name=$1
@@ -107,6 +114,8 @@ monaddr=
 dofsmount=1
 dofsumount=0
 verbose=0
+use_default_conf=1
+
 
 while echo $1 | grep -q '^-'; do     # FIXME: why not '^-'?
 case $1 in
@@ -147,7 +156,14 @@ case $1 in
 	    [ -z "$2" ] && usage_exit
 	    options="$options $1"
 	    shift
+        use_default_conf=0
 	    conf=$1
+	    ;;
+    --cluster )
+	    [ -z "$2" ] && usage_exit
+	    options="$options $1"
+	    shift
+	    cluster=$1
 	    ;;
     --hostname )
 	    [ -z "$2" ] && usage_exit
@@ -163,6 +179,20 @@ esac
 options="$options $1"
 shift
 done
+
+
+# if `--cluster` was not passed in, fallback to looking at the config name
+if [ -z "$cluster" ]; then
+    cluster=`echo $conf | awk -F'/' '{print $(NF)}' | cut -d'.' -f 1`
+else
+    # if we were told to use a given cluster name then $conf needs to be updated
+    # but just define it if `--conf` was not specified, otherwise we would be silently
+    # overriding $conf even if it was defined with `--conf`
+    if [ $use_default_conf -eq 1 ]; then
+        conf="/etc/ceph/$cluster.conf"
+    fi
+fi
+
 
 verify_conf
 
@@ -186,7 +216,7 @@ for name in $what; do
     num=$id
     name="$type.$id"
 
-    check_host || continue
+    check_host $cluster || continue
 
     binary="$BINDIR/ceph-$type"
     cmd="$binary -i $id"
@@ -228,7 +258,7 @@ for name in $what; do
     cmd="$cmd -c $conf"
 
     if echo $name | grep -q ^osd; then
-	get_conf osd_data "/var/lib/ceph/osd/ceph-$id" "osd data"
+	get_conf osd_data "/var/lib/ceph/osd/$cluster-$id" "osd data"
 	get_conf fs_path "$osd_data" "fs path"  # mount point defaults so osd data
         get_conf fs_devs "" "devs"
 	if [ -z "$fs_devs" ]; then
@@ -269,7 +299,11 @@ for name in $what; do
 	    [ -n "$wrap" ] && runmode="-f &" && runarg="-f"
 	    [ -n "$max_open_files" ] && files="ulimit -n $max_open_files;"
 
-	    cmd="$files $wrap $cmd $runmode"
+	    if [ $SYSTEMD -eq 1 ]; then
+		cmd="systemd-run -r bash -c '$files $cmd --cluster $cluster -f'"
+	    else
+		cmd="$files $wrap $cmd --cluster $cluster $runmode"
+	    fi
 
 	    if [ $dofsmount -eq 1 ] && [ -n "$fs_devs" ]; then
 		get_conf pre_mount "true" "pre mount command"
@@ -308,10 +342,14 @@ for name in $what; do
 
 		if [ "$fs_type" = "btrfs" ]; then
 		    echo Mounting Btrfs on $host:$fs_path
-		    do_root_cmd "modprobe btrfs ; btrfs device scan || btrfsctl -a ; egrep -q '^[^ ]+ $fs_path' /proc/mounts || mount -t btrfs $fs_opt $first_dev $fs_path"
+		    do_root_cmd_okfail "modprobe btrfs ; btrfs device scan || btrfsctl -a ; egrep -q '^[^ ]+ $fs_path' /proc/mounts || mount -t btrfs $fs_opt $first_dev $fs_path"
 		else
 		    echo Mounting $fs_type on $host:$fs_path
-		    do_root_cmd "modprobe $fs_type ; egrep -q '^[^ ]+ $fs_path' /proc/mounts || mount -t $fs_type $fs_opt $first_dev $fs_path"
+		    do_root_cmd_okfail "modprobe $fs_type ; egrep -q '^[^ ]+ $fs_path' /proc/mounts || mount -t $fs_type $fs_opt $first_dev $fs_path"
+		fi
+		if [ "$ERR" != "0" ]; then
+		    EXIT_STATUS=$ERR
+		    continue
 		fi
 	    fi
 
@@ -320,18 +358,15 @@ for name in $what; do
 		if [ "${update_crush:-1}" = "1" -o "${update_crush:-1}" = "true" ]; then
 		    # update location in crush
 		    get_conf osd_location_hook "$BINDIR/ceph-crush-location" "osd crush location hook"
-		    osd_location=`$osd_location_hook --cluster ceph --id $id --type osd`
+		    osd_location=`$osd_location_hook --cluster $cluster --id $id --type osd`
 		    get_conf osd_weight "" "osd crush initial weight"
-		    defaultweight="$(do_cmd "df -P -k $osd_data/. | tail -1 | awk '{ d= \$2/1073741824 ; r = sprintf(\"%.2f\", d); print r }'")"
+		    defaultweight="$(df -P -k $osd_data/. | tail -1 | awk '{ print sprintf("%.2f",$2/1073741824) }')"
 		    get_conf osd_keyring "$osd_data/keyring" "keyring"
-		    do_cmd "timeout 10 $BINDIR/ceph \
-			--name=osd.$id \
-			--keyring=$osd_keyring \
-			osd crush create-or-move \
-			-- \
-			$id \
-			${osd_weight:-${defaultweight:-1}} \
-			$osd_location"
+		    do_cmd_okfail "timeout 30 $BINDIR/ceph -c $conf --name=osd.$id --keyring=$osd_keyring osd crush create-or-move -- $id ${osd_weight:-${defaultweight:-1}} $osd_location"
+		    if [ "$ERR" != "0" ]; then
+			EXIT_STATUS=$ERR
+			continue
+		    fi
 		fi
 	    fi
 
@@ -345,6 +380,7 @@ for name in $what; do
 	    do_cmd_okfail "$cmd" $runarg
 	    if [ "$ERR" != "0" ]; then
 		EXIT_STATUS=$ERR
+		continue
 	    fi
 
 	    if [ "$type" = "mon" ]; then
@@ -352,13 +388,13 @@ for name in $what; do
 		# for the mon data and admin socket.  if so, run
 		# ceph-create-keys.  this is the case for (normal)
 		# chef and ceph-deploy clusters, which is who needs
-		# these keys.  it's also true for default installs
+		# these keys.  it's also true for legacy installs
 		# via mkcephfs, which is fine too; there is no harm
 		# in creating these keys.
 		get_conf mon_data "/var/lib/ceph/mon/ceph-$id" "mon data"
 		if [ "$mon_data" = "/var/lib/ceph/mon/ceph-$id" -a "$asok" = "/var/run/ceph/ceph-mon.$id.asok" ]; then
 		    echo Starting ceph-create-keys on $host...
-		    cmd2="$SBINDIR/ceph-create-keys -i $id 2> /dev/null &"
+		    cmd2="$SBINDIR/ceph-create-keys --cluster $cluster -i $id 2> /dev/null &"
 		    do_cmd "$cmd2"
 		fi
 	    fi

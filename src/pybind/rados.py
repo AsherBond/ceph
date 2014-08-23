@@ -144,7 +144,6 @@ class RadosThread(threading.Thread):
 POLL_TIME_INCR = 0.5
 
 def run_in_thread(target, args, timeout=0):
-    import sys
     interrupt = False
 
     countdown = timeout
@@ -160,7 +159,7 @@ def run_in_thread(target, args, timeout=0):
         # poll for thread exit
         while t.is_alive():
             t.join(POLL_TIME_INCR)
-            if timeout:
+            if timeout and t.is_alive():
                 countdown = countdown - POLL_TIME_INCR
                 if countdown <= 0:
                     raise KeyboardInterrupt
@@ -182,7 +181,7 @@ def run_in_thread(target, args, timeout=0):
 class Rados(object):
     """librados python wrapper"""
     def require_state(self, *args):
-        """ 
+        """
         Checks if the Rados object is in a special state
 
         :raises: RadosStateError
@@ -200,8 +199,8 @@ Rados object in state %s." % (self.state))
             #maybe find_library can not find it correctly on all platforms.
             try:
                 self.librados = CDLL('librados.so.2')
-            except OSError:
-                raise EnvironmentError("Unable to find librados")
+            except OSError as e:
+                    raise EnvironmentError("Unable to load librados: %s" % e)
             except:
                 raise Error("Unexpected error")
         else:
@@ -266,7 +265,7 @@ Rados object in state %s." % (self.state))
     def version(self):
         """
         Get the version number of the ``librados`` C library.
-    
+
         :returns: a tuple of ``(major, minor, extra)`` components of the
                   librados version
         """
@@ -383,7 +382,7 @@ Rados object in state %s." % (self.state))
       Ping a monitor to assess liveness
 
       May be used as a simply way to assess liveness, or to obtain
-      informations about the monitor in a simple way even in the
+      information about the monitor in a simple way even in the
       absence of quorum.
 
       :param mon_id: the ID portion of the monitor's name (i.e., mon.<ID>)
@@ -422,20 +421,20 @@ Rados object in state %s." % (self.state))
     def get_cluster_stats(self):
         """
         Read usage info about the cluster
-        
+
         This tells you total space, space used, space available, and number
         of objects. These are not updated immediately when data is written,
         they are eventually consistent.
 
         :returns: dict - contains the following keys:
 
-            *``kb`` (int) - total space 
+            - ``kb`` (int) - total space
 
-            *``kb_used`` (int) - space used
+            - ``kb_used`` (int) - space used
 
-            *``kb_avail`` (int) - free space available
+            - ``kb_avail`` (int) - free space available
 
-            *``num_objects`` (int) - number of objects
+            - ``num_objects`` (int) - number of objects
 
         """
         stats = rados_cluster_stat_t()
@@ -521,7 +520,7 @@ Rados object in state %s." % (self.state))
         The pool is removed from the cluster immediately,
         but the actual data is deleted in the background.
 
-        :param pool_name: name of the pool to delete 
+        :param pool_name: name of the pool to delete
         :type pool_name: str
 
         :raises: :class:`TypeError`, :class:`Error`
@@ -536,7 +535,7 @@ Rados object in state %s." % (self.state))
 
     def list_pools(self):
         """
-        Gets a list of pool names. 
+        Gets a list of pool names.
 
         :returns: list - of pool names.
         """
@@ -573,13 +572,13 @@ Rados object in state %s." % (self.state))
         Create an io context
 
         The io context allows you to perform operations within a particular
-        pool. 
+        pool.
 
-        :param ioctx_name: name of the pool 
+        :param ioctx_name: name of the pool
         :type ioctx_name: str
 
         :raises: :class:`TypeError`, :class:`Error`
-        :returns: Ioctx - Rados Ioctx object 
+        :returns: Ioctx - Rados Ioctx object
         """
         self.require_state("connected")
         if not isinstance(ioctx_name, str):
@@ -596,7 +595,6 @@ Rados object in state %s." % (self.state))
         mon_command[_target](cmd, inbuf, outbuf, outbuflen, outs, outslen)
         returns (int ret, string outbuf, string outs)
         """
-        import sys
         self.require_state("connected")
         outbufp = pointer(pointer(c_char()))
         outbuflen = c_long()
@@ -634,7 +632,6 @@ Rados object in state %s." % (self.state))
         osd_command(osdid, cmd, inbuf, outbuf, outbuflen, outs, outslen)
         returns (int ret, string outbuf, string outs)
         """
-        import sys
         self.require_state("connected")
         outbufp = pointer(pointer(c_char()))
         outbuflen = c_long()
@@ -664,7 +661,6 @@ Rados object in state %s." % (self.state))
         pg_command(pgid, cmd, inbuf, outbuf, outbuflen, outs, outslen)
         returns (int ret, string outbuf, string outs)
         """
-        import sys
         self.require_state("connected")
         outbufp = pointer(pointer(c_char()))
         outbuflen = c_long()
@@ -782,7 +778,7 @@ ioctx '%s'" % self.ioctx.name)
         """
         Get the next Snapshot
 
-        :raises: :class:`Error`, StopIteration 
+        :raises: :class:`Error`, StopIteration
         :returns: Snap - next snapshot
         """
         if (self.cur_snap >= self.max_snap):
@@ -872,8 +868,8 @@ class Completion(object):
                              (self.rados_comp,))
 
     def __del__(self):
-        """ 
-        Release a completion 
+        """
+        Release a completion
 
         Call this when you no longer need the completion. It may not be
         freed immediately if the operation is not acked and committed.
@@ -907,8 +903,8 @@ class Ioctx(object):
         self.close()
 
     def __aio_safe_cb(self, completion, _):
-        """ 
-        Callback to onsafe() for asynchronous operations 
+        """
+        Callback to onsafe() for asynchronous operations
         """
         cb = None
         with self.lock:
@@ -918,8 +914,8 @@ class Ioctx(object):
         return 0
 
     def __aio_complete_cb(self, completion, _):
-        """ 
-        Callback to oncomplete() for asynchronous operations 
+        """
+        Callback to oncomplete() for asynchronous operations
         """
         cb = None
         with self.lock:
@@ -940,7 +936,7 @@ class Ioctx(object):
         :type onsafe: completion
 
         :raises: :class:`Error`
-        :returns: completion object 
+        :returns: completion object
         """
         completion = c_void_p(0)
         complete_cb = None
@@ -983,7 +979,7 @@ class Ioctx(object):
         :type onsafe: completion
 
         :raises: :class:`Error`
-        :returns: completion object 
+        :returns: completion object
         """
         completion = self.__get_completion(oncomplete, onsafe)
         ret = run_in_thread(self.librados.rados_aio_write,
@@ -1015,7 +1011,7 @@ class Ioctx(object):
         :type onsafe: completion
 
         :raises: :class:`Error`
-        :returns: completion object 
+        :returns: completion object
         """
         completion = self.__get_completion(oncomplete, onsafe)
         ret = run_in_thread(self.librados.rados_aio_write_full,
@@ -1046,7 +1042,7 @@ class Ioctx(object):
         :type onsafe: completion
 
         :raises: :class:`Error`
-        :returns: completion object 
+        :returns: completion object
         """
         completion = self.__get_completion(oncomplete, onsafe)
         ret = run_in_thread(self.librados.rados_aio_append,
@@ -1098,6 +1094,30 @@ class Ioctx(object):
                             c_uint64(offset)))
         if ret < 0:
             raise make_ex(ret, "error reading %s" % object_name)
+        return completion
+
+    def aio_remove(self, object_name, oncomplete=None, onsafe=None):
+        """
+        Asychronously remove an object
+
+        :param object_name: name of the object to remove
+        :type object_name: str
+        :param oncomplete: what to do when the remove is safe and complete in memory
+            on all replicas
+        :type oncomplete: completion
+        :param onsafe:  what to do when the remove is safe and complete on storage
+            on all replicas
+        :type onsafe: completion
+
+        :raises: :class:`Error`
+        :returns: completion object
+        """
+        completion = self.__get_completion(oncomplete, onsafe)
+        ret = run_in_thread(self.librados.rados_aio_remove,
+                            (self.io, c_char_p(object_name),
+                            completion.rados_comp))
+        if ret < 0:
+            raise make_ex(ret, "error removing %s" % object_name)
         return completion
 
     def require_ioctx_open(self):
@@ -1181,29 +1201,26 @@ class Ioctx(object):
         :type offset: int
 
         :raises: :class:`TypeError`
-        :raises: :class:`IncompleteWriteError`
         :raises: :class:`LogicError`
-        :returns: int - number of bytes written 
+        :returns: int - 0 on success
         """
         self.require_ioctx_open()
+        if not isinstance(key, str):
+            raise TypeError('key must be a string')
         if not isinstance(data, str):
             raise TypeError('data must be a string')
         length = len(data)
         ret = run_in_thread(self.librados.rados_write,
                             (self.io, c_char_p(key), c_char_p(data),
                             c_size_t(length), c_uint64(offset)))
-        if ret == length:
+        if ret == 0:
             return ret
         elif ret < 0:
             raise make_ex(ret, "Ioctx.write(%s): failed to write %s" % \
                 (self.name, key))
-        elif ret < length:
-            raise IncompleteWriteError("Wrote only %d out of %d bytes" % \
-                (ret, length))
         else:
             raise LogicError("Ioctx.write(%s): rados_write \
-returned %d, but %d was the maximum number of bytes it could have \
-written." % (self.name, ret, length))
+returned %d, but should return zero on success." % (self.name, ret))
 
     def write_full(self, key, data):
         """
@@ -1232,18 +1249,52 @@ written." % (self.name, ret, length))
                             c_size_t(length)))
         if ret == 0:
             return ret
-        else:
-            raise make_ex(ret, "Ioctx.write(%s): failed to write_full %s" % \
+        elif ret < 0:
+            raise make_ex(ret, "Ioctx.write_full(%s): failed to write %s" % \
                 (self.name, key))
+        else:
+            raise LogicError("Ioctx.write_full(%s): rados_write_full \
+returned %d, but should return zero on success." % (self.name, ret))
+
+    def append(self, key, data):
+        """
+        Append data to an object synchronously
+
+        :param key: name of the object
+        :type key: str
+        :param data: data to write
+        :type data: str
+
+        :raises: :class:`TypeError`
+        :raises: :class:`LogicError`
+        :returns: int - 0 on success
+        """
+        self.require_ioctx_open()
+        if not isinstance(key, str):
+            raise TypeError('key must be a string')
+        if not isinstance(data, str):
+            raise TypeError('data must be a string')
+        length = len(data)
+        ret = run_in_thread(self.librados.rados_append,
+                            (self.io, c_char_p(key), c_char_p(data),
+                            c_size_t(length)))
+        if ret == 0:
+            return ret
+        elif ret < 0:
+            raise make_ex(ret, "Ioctx.append(%s): failed to append %s" % \
+                (self.name, key))
+        else:
+            raise LogicError("Ioctx.append(%s): rados_append \
+returned %d, but should return zero on success." % (self.name, ret))
 
     def read(self, key, length=8192, offset=0):
         """
-        Write data to an object synchronously
+        Read data from an object synchronously
 
         :param key: name of the object
         :type key: str
         :param length: the number of bytes to read (default=8192)
-        :type length: int 
+        :type length: int
         :param offset: byte offset in the object to begin reading at
         :type offset: int
 
@@ -1268,30 +1319,30 @@ written." % (self.name, ret, length))
 
         :returns: dict - contains the following keys:
 
-            *``num_bytes`` (int) - size of pool in bytes
+            - ``num_bytes`` (int) - size of pool in bytes
 
-            *``num_kb`` (int) - size of pool in kbytes
+            - ``num_kb`` (int) - size of pool in kbytes
 
-            *``num_objects`` (int) - number of objects in the pool
+            - ``num_objects`` (int) - number of objects in the pool
 
-            *``num_object_clones`` (int) - number of object clones
+            - ``num_object_clones`` (int) - number of object clones
 
-            *``num_object_copies`` (int) - number of object copies
+            - ``num_object_copies`` (int) - number of object copies
 
-            *``num_objects_missing_on_primary`` (int) - number of objets
+            - ``num_objects_missing_on_primary`` (int) - number of objets
                 missing on primary
 
-            *``num_objects_unfound`` (int) - number of unfound objects
+            - ``num_objects_unfound`` (int) - number of unfound objects
 
-            *``num_objects_degraded`` (int) - number of degraded objects
+            - ``num_objects_degraded`` (int) - number of degraded objects
 
-            *``num_rd`` (int) - bytes read
+            - ``num_rd`` (int) - bytes read
 
-            *``num_rd_kb`` (int) - kbytes read
+            - ``num_rd_kb`` (int) - kbytes read
 
-            *``num_wr`` (int) - bytes written
+            - ``num_wr`` (int) - bytes written
 
-            *``num_wr_kb`` (int) - kbytes written
+            - ``num_wr_kb`` (int) - kbytes written
         """
         self.require_ioctx_open()
         stats = rados_pool_stat_t()
@@ -1350,7 +1401,7 @@ written." % (self.name, ret, length))
         :raises: :class:`Error`
         :returns: int - 0 on success, otherwise raises error
         """
-        
+
         self.require_ioctx_open()
         if not isinstance(key, str):
             raise TypeError('key must be a string')
@@ -1363,7 +1414,7 @@ written." % (self.name, ret, length))
     def stat(self, key):
         """
         Get object stats (size/mtime)
-        
+
         :param key: the name of the object to get stats from
         :type key: str
 
@@ -1387,7 +1438,7 @@ written." % (self.name, ret, length))
     def get_xattr(self, key, xattr_name):
         """
         Get the value of an extended attribute on an object.
-        
+
         :param key: the name of the object to get xattr from
         :type key: str
         :param xattr_name: which extended attribute to read
@@ -1417,7 +1468,7 @@ written." % (self.name, ret, length))
     def get_xattrs(self, oid):
         """
         Start iterating over xattrs on an object.
-        
+
         :param oid: the name of the object to get xattrs from
         :type key: str
 
@@ -1438,7 +1489,7 @@ written." % (self.name, ret, length))
     def set_xattr(self, key, xattr_name, xattr_value):
         """
         Set an extended attribute on an object.
-        
+
         :param key: the name of the object to set xattr to
         :type key: str
         :param xattr_name: which extended attribute to set
@@ -1467,7 +1518,7 @@ written." % (self.name, ret, length))
     def rm_xattr(self, key, xattr_name):
         """
         Removes an extended attribute on from an object.
-        
+
         :param key: the name of the object to remove xattr from
         :type key: str
         :param xattr_name: which extended attribute to remove
@@ -1490,7 +1541,7 @@ written." % (self.name, ret, length))
         return True
 
     def list_objects(self):
-        """ 
+        """
         Get ObjectIterator on rados.Ioctx object.
 
         :returns: ObjectIterator
@@ -1499,7 +1550,7 @@ written." % (self.name, ret, length))
         return ObjectIterator(self)
 
     def list_snaps(self):
-        """ 
+        """
         Get SnapIterator on rados.Ioctx object.
 
         :returns: SnapIterator
@@ -1657,7 +1708,7 @@ MONITOR_LEVELS = [
    "debug",
    "info",
    "warn", "warning",
-   "err", "error", 
+   "err", "error",
    "sec",
    ]
 

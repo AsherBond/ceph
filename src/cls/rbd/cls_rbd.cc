@@ -37,6 +37,7 @@
 #include <sstream>
 #include <vector>
 
+#include "common/errno.h"
 #include "objclass/objclass.h"
 #include "include/rbd_types.h"
 
@@ -115,7 +116,11 @@ static int snap_read_header(cls_method_context_t hctx, bufferlist& bl)
     if (rc < 0)
       return rc;
 
+    if (bl.length() < sizeof(*header))
+      return -EINVAL;
+
     header = (struct rbd_obj_header_ondisk *)bl.c_str();
+    assert(header);
 
     if ((snap_count != header->snap_count) ||
         (snap_names_len != header->snap_names_len)) {
@@ -290,7 +295,7 @@ int get_features(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
   if (snap_id == CEPH_NOSNAP) {
     int r = read_key(hctx, "features", &features);
     if (r < 0) {
-      CLS_ERR("failed to read features off disk: %s", strerror(r));
+      CLS_ERR("failed to read features off disk: %s", cpp_strerror(r).c_str());
       return r;
     }
   } else {
@@ -359,14 +364,14 @@ int get_size(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 
   int r = read_key(hctx, "order", &order);
   if (r < 0) {
-    CLS_ERR("failed to read the order off of disk: %s", strerror(r));
+    CLS_ERR("failed to read the order off of disk: %s", cpp_strerror(r).c_str());
     return r;
   }
 
   if (snap_id == CEPH_NOSNAP) {
     r = read_key(hctx, "size", &size);
     if (r < 0) {
-      CLS_ERR("failed to read the image's size off of disk: %s", strerror(r));
+      CLS_ERR("failed to read the image's size off of disk: %s", cpp_strerror(r).c_str());
       return r;
     }
   } else {
@@ -409,7 +414,7 @@ int set_size(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
   uint64_t orig_size;
   int r = read_key(hctx, "size", &orig_size);
   if (r < 0) {
-    CLS_ERR("Could not read image's size off disk: %s", strerror(r));
+    CLS_ERR("Could not read image's size off disk: %s", cpp_strerror(r).c_str());
     return r;
   }
 
@@ -501,7 +506,7 @@ int get_protection_status(cls_method_context_t hctx, bufferlist *in,
   key_from_snap_id(snap_id.val, &snapshot_key);
   r = read_key(hctx, snapshot_key, &snap);
   if (r < 0) {
-    CLS_ERR("could not read key for snapshot id %"PRIu64, snap_id.val);
+    CLS_ERR("could not read key for snapshot id %" PRIu64, snap_id.val);
     return r;
   }
 
@@ -568,7 +573,7 @@ int set_protection_status(cls_method_context_t hctx, bufferlist *in,
   key_from_snap_id(snap_id.val, &snapshot_key);
   r = read_key(hctx, snapshot_key, &snap);
   if (r < 0) {
-    CLS_ERR("could not read key for snapshot id %"PRIu64, snap_id.val);
+    CLS_ERR("could not read key for snapshot id %" PRIu64, snap_id.val);
     return r;
   }
 
@@ -615,7 +620,7 @@ int get_stripe_unit_count(cls_method_context_t hctx, bufferlist *in, bufferlist 
     uint8_t order;
     r = read_key(hctx, "order", &order);
     if (r < 0) {
-      CLS_ERR("failed to read the order off of disk: %s", strerror(r));
+      CLS_ERR("failed to read the order off of disk: %s", cpp_strerror(r).c_str());
       return -EIO;
     }
     stripe_unit = 1ull << order;
@@ -674,7 +679,7 @@ int set_stripe_unit_count(cls_method_context_t hctx, bufferlist *in, bufferlist 
   uint8_t order;
   r = read_key(hctx, "order", &order);
   if (r < 0) {
-    CLS_ERR("failed to read the order off of disk: %s", strerror(r));
+    CLS_ERR("failed to read the order off of disk: %s", cpp_strerror(r).c_str());
     return r;
   }
   if ((1ull << order) % stripe_unit || stripe_unit > (1ull << order)) {
@@ -952,7 +957,7 @@ int add_child(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
   if (r < 0)
     return r;
 
-  CLS_LOG(20, "add_child %s to (%"PRIu64", %s, %"PRIu64")", c_image_id.c_str(),
+  CLS_LOG(20, "add_child %s to (%" PRIu64 ", %s, %" PRIu64 ")", c_image_id.c_str(),
 	  p_pool_id, p_image_id.c_str(), p_snap_id.val);
 
   string key = parent_key(p_pool_id, p_image_id, p_snap_id);
@@ -1006,7 +1011,7 @@ int remove_child(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
   if (r < 0)
     return r;
 
-  CLS_LOG(20, "remove_child %s from (%"PRIu64", %s, %"PRIu64")",
+  CLS_LOG(20, "remove_child %s from (%" PRIu64 ", %s, %" PRIu64 ")",
 	       c_image_id.c_str(), p_pool_id, p_image_id.c_str(),
 	       p_snap_id.val);
 
@@ -1067,7 +1072,7 @@ int get_children(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
   if (r < 0)
     return r;
 
-  CLS_LOG(20, "get_children of (%"PRIu64", %s, %"PRIu64")",
+  CLS_LOG(20, "get_children of (%" PRIu64 ", %s, %" PRIu64 ")",
 	  p_pool_id, p_image_id.c_str(), p_snap_id.val);
 
   string key = parent_key(p_pool_id, p_image_id, p_snap_id);
@@ -1121,7 +1126,7 @@ int get_snapcontext(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
   uint64_t snap_seq;
   r = read_key(hctx, "snap_seq", &snap_seq);
   if (r < 0) {
-    CLS_ERR("could not read the image's snap_seq off disk: %s", strerror(r));
+    CLS_ERR("could not read the image's snap_seq off disk: %s", cpp_strerror(r).c_str());
     return r;
   }
 
@@ -1147,7 +1152,7 @@ int get_object_prefix(cls_method_context_t hctx, bufferlist *in, bufferlist *out
   int r = read_key(hctx, "object_prefix", &object_prefix);
   if (r < 0) {
     CLS_ERR("failed to read the image's object prefix off of disk: %s",
-            strerror(r));
+            cpp_strerror(r).c_str());
     return r;
   }
 
@@ -1218,7 +1223,7 @@ int snapshot_add(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
   uint64_t cur_snap_seq;
   int r = read_key(hctx, "snap_seq", &cur_snap_seq);
   if (r < 0) {
-    CLS_ERR("Could not read image's snap_seq off disk: %s", strerror(r));
+    CLS_ERR("Could not read image's snap_seq off disk: %s", cpp_strerror(r).c_str());
     return r;
   }
 
@@ -1229,12 +1234,12 @@ int snapshot_add(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 
   r = read_key(hctx, "size", &snap_meta.image_size);
   if (r < 0) {
-    CLS_ERR("Could not read image's size off disk: %s", strerror(r));
+    CLS_ERR("Could not read image's size off disk: %s", cpp_strerror(r).c_str());
     return r;
   }
   r = read_key(hctx, "features", &snap_meta.features);
   if (r < 0) {
-    CLS_ERR("Could not read image's features off disk: %s", strerror(r));
+    CLS_ERR("Could not read image's features off disk: %s", cpp_strerror(r).c_str());
     return r;
   }
 
@@ -1418,7 +1423,7 @@ int get_id(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 
   ::encode(id, *out);
   return 0;
-};
+}
 
 /**
  * Set the id of an image. The object must already exist.

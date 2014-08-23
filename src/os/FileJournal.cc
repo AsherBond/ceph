@@ -11,6 +11,7 @@
  * Foundation.  See file COPYING.
  * 
  */
+#include "acconfig.h"
 
 #include "common/debug.h"
 #include "common/errno.h"
@@ -18,7 +19,7 @@
 #include "FileJournal.h"
 #include "include/color.h"
 #include "common/perf_counters.h"
-#include "os/ObjectStore.h"
+#include "os/FileStore.h"
 
 #include "include/compat.h"
 
@@ -74,8 +75,8 @@ int FileJournal::_open(bool forwrite, bool create)
   fd = TEMP_FAILURE_RETRY(::open(fn.c_str(), flags, 0644));
   if (fd < 0) {
     int err = errno;
-    dout(2) << "FileJournal::_open: unable to open journal: open() failed: "
-	    << cpp_strerror(err) << dendl;
+    dout(2) << "FileJournal::_open unable to open journal "
+	    << fn << ": " << cpp_strerror(err) << dendl;
     return -err;
   }
 
@@ -102,12 +103,14 @@ int FileJournal::_open(bool forwrite, bool create)
     goto out_fd;
 
 #ifdef HAVE_LIBAIO
-  aio_ctx = 0;
-  ret = io_setup(128, &aio_ctx);
-  if (ret < 0) {
-    ret = errno;
-    derr << "FileJournal::_open: unable to setup io_context " << cpp_strerror(ret) << dendl;
-    goto out_fd;
+  if (aio) {
+    aio_ctx = 0;
+    ret = io_setup(128, &aio_ctx);
+    if (ret < 0) {
+      ret = errno;
+      derr << "FileJournal::_open: unable to setup io_context " << cpp_strerror(ret) << dendl;
+      goto out_fd;
+    }
   }
 #endif
 
@@ -123,7 +126,7 @@ int FileJournal::_open(bool forwrite, bool create)
   return 0;
 
  out_fd:
-  TEMP_FAILURE_RETRY(::close(fd));
+  VOID_TEMP_FAILURE_RETRY(::close(fd));
   return ret;
 }
 
@@ -258,6 +261,7 @@ int FileJournal::_open_file(int64_t oldsize, blksize_t blksize,
 	   << newsize << " bytes: " << cpp_strerror(err) << dendl;
       return -err;
     }
+#ifdef HAVE_POSIX_FALLOCATE
     ret = ::posix_fallocate(fd, 0, newsize);
     if (ret) {
       derr << "FileJournal::_open_file : unable to preallocation journal to "
@@ -265,6 +269,24 @@ int FileJournal::_open_file(int64_t oldsize, blksize_t blksize,
       return -ret;
     }
     max_size = newsize;
+#elif defined(__APPLE__)
+    fstore_t store;
+    store.fst_flags = F_ALLOCATECONTIG;
+    store.fst_posmode = F_PEOFPOSMODE;
+    store.fst_offset = 0;
+    store.fst_length = newsize;
+
+    ret = ::fcntl(fd, F_PREALLOCATE, &store);
+    if (ret == -1) {
+      ret = -errno;
+      derr << "FileJournal::_open_file : unable to preallocation journal to "
+	   << newsize << " bytes: " << cpp_strerror(ret) << dendl;
+      return ret;
+    }
+    max_size = newsize;
+#else
+# error "Journal pre-allocation not supported on platform."
+#endif
   }
   else {
     max_size = oldsize;
@@ -324,7 +346,7 @@ int FileJournal::check()
   ret = 0;
 
  done:
-  TEMP_FAILURE_RETRY(::close(fd));
+  VOID_TEMP_FAILURE_RETRY(::close(fd));
   fd = -1;
   return ret;
 }
@@ -524,8 +546,9 @@ void FileJournal::close()
 
   // close
   assert(writeq_empty());
+  assert(!must_write_header);
   assert(fd >= 0);
-  TEMP_FAILURE_RETRY(::close(fd));
+  VOID_TEMP_FAILURE_RETRY(::close(fd));
   fd = -1;
 }
 
@@ -544,9 +567,9 @@ int FileJournal::dump(ostream& out)
   JSONFormatter f(true);
 
   f.open_array_section("journal");
+  uint64_t seq = 0;
   while (1) {
     bufferlist bl;
-    uint64_t seq = 0;
     uint64_t pos = read_pos;
     if (!read_entry(bl, seq)) {
       dout(3) << "journal_replay: end of journal, done." << dendl;
@@ -584,7 +607,8 @@ void FileJournal::start_writer()
   write_stop = false;
   write_thread.create();
 #ifdef HAVE_LIBAIO
-  write_finish_thread.create();
+  if (aio)
+    write_finish_thread.create();
 #endif
 }
 
@@ -593,19 +617,25 @@ void FileJournal::stop_writer()
   {
     Mutex::Locker l(write_lock);
 #ifdef HAVE_LIBAIO
-    Mutex::Locker q(aio_lock);
+    if (aio)
+      aio_lock.Lock();
 #endif
     Mutex::Locker p(writeq_lock);
     write_stop = true;
     writeq_cond.Signal();
 #ifdef HAVE_LIBAIO
-    aio_cond.Signal();
-    write_finish_cond.Signal();
+    if (aio) {
+      aio_cond.Signal();
+      write_finish_cond.Signal();
+      aio_lock.Unlock();
+    }
 #endif
   } 
   write_thread.join();
 #ifdef HAVE_LIBAIO
-  write_finish_thread.join();
+  if (aio) {
+    write_finish_thread.join();
+  }
 #endif
 }
 
@@ -629,6 +659,13 @@ int FileJournal::read_header()
   buffer::ptr bp = buffer::create_page_aligned(block_size);
   bp.zero();
   int r = ::pread(fd, bp.c_str(), bp.length(), 0);
+
+  if (r < 0) {
+    int err = errno;
+    dout(0) << "read_header got " << cpp_strerror(err) << dendl;
+    return -err;
+  }
+
   bl.push_back(bp);
 
   try {
@@ -640,11 +677,6 @@ int FileJournal::read_header()
     return -EINVAL;
   }
 
-  if (r < 0) {
-    int err = errno;
-    dout(0) << "read_header got " << cpp_strerror(err) << dendl;
-    return -err;
-  }
   
   /*
    * Unfortunately we weren't initializing the flags field for new
@@ -1082,7 +1114,7 @@ void FileJournal::write_thread_entry()
   while (1) {
     {
       Mutex::Locker locker(writeq_lock);
-      if (writeq.empty()) {
+      if (writeq.empty() && !must_write_header) {
 	if (write_stop)
 	  break;
 	dout(20) << "write_thread_entry going to sleep" << dendl;
@@ -1093,7 +1125,9 @@ void FileJournal::write_thread_entry()
     }
     
 #ifdef HAVE_LIBAIO
-    if (aio) {
+    //We hope write_finish_thread_entry return until the last aios complete
+    //when set write_stop. But it can't. So don't use aio mode when shutdown.
+    if (aio && !write_stop) {
       Mutex::Locker locker(aio_lock);
       // should we back off to limit aios in flight?  try to do this
       // adaptively so that we submit larger aios once we have lots of
@@ -1144,7 +1178,7 @@ void FileJournal::write_thread_entry()
     }
 
 #ifdef HAVE_LIBAIO
-    if (aio)
+    if (aio && !write_stop)
       do_aio_write(bl);
     else
       do_write(bl);
@@ -1356,7 +1390,7 @@ void FileJournal::check_aio_completion()
   assert(aio_lock.is_locked());
   dout(20) << "check_aio_completion" << dendl;
 
-  bool completed_something = false;
+  bool completed_something = false, signal = false;
   uint64_t new_journaled_seq = 0;
 
   list<aio_info>::iterator p = aio_queue.begin();
@@ -1370,6 +1404,7 @@ void FileJournal::check_aio_completion()
     aio_num--;
     aio_bytes -= p->len;
     aio_queue.erase(p++);
+    signal = true;
   }
 
   if (completed_something) {
@@ -1389,7 +1424,8 @@ void FileJournal::check_aio_completion()
 	queue_completions_thru(journaled_seq);
       }
     }
-
+  }
+  if (signal) {
     // maybe write queue was waiting for aio count to drop?
     aio_cond.Signal();
   }
@@ -1556,9 +1592,12 @@ void FileJournal::put_throttle(uint64_t ops, uint64_t bytes)
   }
 }
 
-void FileJournal::make_writeable()
+int FileJournal::make_writeable()
 {
-  _open(true);
+  dout(10) << __func__ << dendl;
+  int r = _open(true);
+  if (r < 0)
+    return r;
 
   if (read_pos > 0)
     write_pos = read_pos;
@@ -1568,6 +1607,7 @@ void FileJournal::make_writeable()
 
   must_write_header = true;
   start_writer();
+  return 0;
 }
 
 void FileJournal::wrap_read_bl(
@@ -1587,11 +1627,7 @@ void FileJournal::wrap_read_bl(
     else
       len = olen;                         // rest
     
-#ifdef DARWIN
-    int64_t actual = ::lseek(fd, pos, SEEK_SET);
-#else
     int64_t actual = ::lseek64(fd, pos, SEEK_SET);
-#endif
     assert(actual == pos);
     
     bufferptr bp = buffer::create(len);
@@ -1738,7 +1774,12 @@ FileJournal::read_entry_result FileJournal::do_read_entry(
   // ok!
   if (seq)
     *seq = h->seq;
-  journalq.push_back(pair<uint64_t,off64_t>(h->seq, pos));
+
+  // works around an apparent GCC 4.8(?) compiler bug about unaligned
+  // bind by reference to (packed) h->seq
+  journalq.push_back(
+    pair<uint64_t,off64_t>(static_cast<uint64_t>(h->seq),
+			   static_cast<off64_t>(pos)));
 
   if (next_pos)
     *next_pos = pos;
@@ -1795,22 +1836,14 @@ void FileJournal::corrupt(
   if (corrupt_at >= header.max_size)
     corrupt_at = corrupt_at + get_top() - header.max_size;
 
-#ifdef DARWIN
-    int64_t actual = ::lseek(fd, corrupt_at, SEEK_SET);
-#else
     int64_t actual = ::lseek64(fd, corrupt_at, SEEK_SET);
-#endif
     assert(actual == corrupt_at);
 
     char buf[10];
     int r = safe_read_exact(fd, buf, 1);
     assert(r == 0);
 
-#ifdef DARWIN
-    actual = ::lseek(wfd, corrupt_at, SEEK_SET);
-#else
     actual = ::lseek64(wfd, corrupt_at, SEEK_SET);
-#endif
     assert(actual == corrupt_at);
 
     buf[0]++;

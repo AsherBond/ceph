@@ -36,7 +36,7 @@ TYPEWITHSTRAYDATA(OSDMap::Incremental)
 #include "crush/CrushWrapper.h"
 TYPE_NOCOPY(CrushWrapper)
 
-#include "include/histogram.h"
+#include "common/histogram.h"
 TYPE(pow2_hist_t)
 
 #include "osd/osd_types.h"
@@ -45,7 +45,7 @@ TYPE(object_locator_t)
 TYPE(request_redirect_t)
 TYPE(pg_t)
 TYPE(coll_t)
-TYPE(filestore_perf_stat_t)
+TYPE(objectstore_perf_stat_t)
 TYPE(osd_stat_t)
 TYPE(OSDSuperblock)
 TYPE_FEATUREFUL(pool_snap_info_t)
@@ -81,6 +81,15 @@ TYPE(obj_list_snap_response_t)
 TYPE(PullOp)
 TYPE(PushOp)
 TYPE(PushReplyOp)
+
+#include "osd/ECUtil.h"
+TYPE(ECUtil::HashInfo)
+
+#include "osd/ECMsgTypes.h"
+TYPE(ECSubWrite)
+TYPE(ECSubWriteReply)
+TYPE(ECSubRead)
+TYPE(ECSubReadReply)
 
 #include "osd/HitSet.h"
 TYPE(ExplicitHashHitSet)
@@ -120,8 +129,11 @@ TYPE(MonCap)
 TYPE(DBObjectMap::_Header)
 TYPE(DBObjectMap::State)
 
-#include "mds/Anchor.h"
-TYPE(Anchor)
+#include "mds/JournalPointer.h"
+TYPE(JournalPointer)
+
+#include "osdc/Journaler.h"
+TYPE(Journaler::Header)
 
 #include "mds/snap.h"
 TYPE(SnapInfo)
@@ -147,6 +159,9 @@ TYPE(cap_reconnect_t)
 TYPE(inode_backtrace_t)
 TYPE(inode_backpointer_t)
 
+#include "mds/CInode.h"
+TYPE(InodeStore)
+
 #include "mds/MDSMap.h"
 TYPE_FEATUREFUL(MDSMap)
 TYPE_FEATUREFUL(MDSMap::mds_info_t)
@@ -154,8 +169,11 @@ TYPE_FEATUREFUL(MDSMap::mds_info_t)
 #include "mds/Capability.h"
 TYPE_NOCOPY(Capability)
 
-#include "mds/AnchorServer.h"
-TYPE(AnchorServer)
+#include "mds/InoTable.h"
+TYPE(InoTable)
+
+#include "mds/SnapServer.h"
+TYPEWITHSTRAYDATA(SnapServer)
 
 #include "mds/SessionMap.h"
 TYPE(SessionMap)
@@ -202,8 +220,8 @@ TYPE(EUpdate)
 #ifdef WITH_RADOSGW
 
 #include "rgw/rgw_rados.h"
-TYPE(RGWObjManifestPart);
-TYPE(RGWObjManifest);
+TYPE(RGWObjManifestPart)
+TYPE(RGWObjManifest)
 
 #include "rgw/rgw_acl.h"
 TYPE(ACLPermission)
@@ -248,9 +266,24 @@ TYPE(cls_rgw_bi_log_list_ret)
 #include "cls/rgw/cls_rgw_client.h"
 TYPE(rgw_bi_log_entry)
 
+#include "cls/user/cls_user_types.h"
+TYPE(cls_user_bucket)
+TYPE(cls_user_bucket_entry)
+TYPE(cls_user_stats)
+TYPE(cls_user_header)
+
+#include "cls/user/cls_user_ops.h"
+TYPE(cls_user_set_buckets_op)
+TYPE(cls_user_remove_bucket_op)
+TYPE(cls_user_list_buckets_op)
+TYPE(cls_user_list_buckets_ret)
+TYPE(cls_user_get_header_op)
+TYPE(cls_user_get_header_ret)
+TYPE(cls_user_complete_stats_sync_op)
+
 #include "rgw/rgw_common.h"
-TYPE(RGWAccessKey);
-TYPE(RGWSubUser);
+TYPE(RGWAccessKey)
+TYPE(RGWSubUser)
 TYPE(RGWUserInfo)
 TYPE(rgw_bucket)
 TYPE(RGWBucketInfo)

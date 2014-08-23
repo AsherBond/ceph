@@ -18,24 +18,24 @@
 #include "msg/Message.h"
 
 class MBackfillReserve : public Message {
-  static const int HEAD_VERSION = 2;
+  static const int HEAD_VERSION = 3;
   static const int COMPAT_VERSION = 1;
 public:
-  pg_t pgid;
+  spg_t pgid;
   epoch_t query_epoch;
   enum {
     REQUEST = 0,
     GRANT = 1,
     REJECT = 2,
   };
-  int type;
-  unsigned priority;
+  uint32_t type;
+  uint32_t priority;
 
   MBackfillReserve()
     : Message(MSG_OSD_BACKFILL_RESERVE, HEAD_VERSION, COMPAT_VERSION),
       query_epoch(0), type(-1), priority(-1) {}
   MBackfillReserve(int type,
-		   pg_t pgid,
+		   spg_t pgid,
 		   epoch_t query_epoch, unsigned prio = -1)
     : Message(MSG_OSD_BACKFILL_RESERVE, HEAD_VERSION, COMPAT_VERSION),
       pgid(pgid), query_epoch(query_epoch),
@@ -65,20 +65,26 @@ public:
 
   void decode_payload() {
     bufferlist::iterator p = payload.begin();
-    ::decode(pgid, p);
+    ::decode(pgid.pgid, p);
     ::decode(query_epoch, p);
     ::decode(type, p);
     if (header.version > 1)
       ::decode(priority, p);
     else
       priority = 0;
+    if (header.version >= 3)
+      ::decode(pgid.shard, p);
+    else
+      pgid.shard = shard_id_t::NO_SHARD;
+
   }
 
   void encode_payload(uint64_t features) {
-    ::encode(pgid, payload);
+    ::encode(pgid.pgid, payload);
     ::encode(query_epoch, payload);
     ::encode(type, payload);
     ::encode(priority, payload);
+    ::encode(pgid.shard, payload);
   }
 };
 

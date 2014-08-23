@@ -23,7 +23,7 @@ map is ``active + clean``.
   The placement group is waiting for clients to replay operations after an OSD crashed.
 
 *Splitting*
-  Ceph is splitting the placment group into multiple placement groups. (functional?)
+  Ceph is splitting the placement group into multiple placement groups. (functional?)
 
 *Scrubbing*
   Ceph is checking the placement group for inconsistencies.
@@ -51,6 +51,10 @@ map is ``active + clean``.
 
 *Wait-backfill*
   The placement group is waiting in line to start backfill.
+
+*Backfill-toofull*
+  A backfill operation is waiting because the destination OSD is over its
+  full ratio.
 
 *Incomplete*
   Ceph detects that a placement group is missing a necessary period of history 

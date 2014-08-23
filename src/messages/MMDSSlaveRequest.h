@@ -94,6 +94,11 @@ class MMDSSlaveRequest : public Message {
   metareqid_t reqid;
   __u32 attempt;
   __s16 op;
+  __u16 flags;
+
+  static const unsigned FLAG_NONBLOCK	= 1;
+  static const unsigned FLAG_WOULDBLOCK	= 2;
+  static const unsigned FLAG_NOTJOURNALED = 4;
 
   // for locking
   __u16 lock_type;  // lock object type
@@ -110,7 +115,7 @@ class MMDSSlaveRequest : public Message {
   bufferlist inode_export;
   version_t inode_export_v;
   bufferlist srci_replica;
-  utime_t now;
+  utime_t op_stamp;
 
   bufferlist stray;  // stray dir + dentry
 
@@ -125,6 +130,12 @@ public:
   MDSCacheObjectInfo &get_authpin_freeze() { return object_info; }
 
   vector<MDSCacheObjectInfo>& get_authpins() { return authpins; }
+  void mark_nonblock() { flags |= FLAG_NONBLOCK; }
+  bool is_nonblock() { return (flags & FLAG_NONBLOCK); }
+  void mark_error_wouldblock() { flags |= FLAG_WOULDBLOCK; }
+  bool is_error_wouldblock() { return (flags & FLAG_WOULDBLOCK); }
+  void mark_not_journaled() { flags |= FLAG_NOTJOURNALED; }
+  bool is_not_journaled() { return (flags & FLAG_NOTJOURNALED); }
 
   void set_lock_type(int t) { lock_type = t; }
 
@@ -133,7 +144,8 @@ public:
   MMDSSlaveRequest() : Message(MSG_MDS_SLAVE_REQUEST) { }
   MMDSSlaveRequest(metareqid_t ri, __u32 att, int o) : 
     Message(MSG_MDS_SLAVE_REQUEST),
-    reqid(ri), attempt(att), op(o) { }
+    reqid(ri), attempt(att), op(o), flags(0), lock_type(0),
+    inode_export_v(0) { }
 private:
   ~MMDSSlaveRequest() {}
 
@@ -142,13 +154,14 @@ public:
     ::encode(reqid, payload);
     ::encode(attempt, payload);
     ::encode(op, payload);
+    ::encode(flags, payload);
     ::encode(lock_type, payload);
     ::encode(object_info, payload);
     ::encode(authpins, payload);
     ::encode(srcdnpath, payload);
     ::encode(destdnpath, payload);
     ::encode(witnesses, payload);
-    ::encode(now, payload);
+    ::encode(op_stamp, payload);
     ::encode(inode_export, payload);
     ::encode(inode_export_v, payload);
     ::encode(srci_replica, payload);
@@ -159,13 +172,14 @@ public:
     ::decode(reqid, p);
     ::decode(attempt, p);
     ::decode(op, p);
+    ::decode(flags, p);
     ::decode(lock_type, p);
     ::decode(object_info, p);
     ::decode(authpins, p);
     ::decode(srcdnpath, p);
     ::decode(destdnpath, p);
     ::decode(witnesses, p);
-    ::decode(now, p);
+    ::decode(op_stamp, p);
     ::decode(inode_export, p);
     ::decode(inode_export_v, p);
     ::decode(srci_replica, p);

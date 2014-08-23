@@ -4,6 +4,9 @@
  * Ceph - scalable distributed file system
  *
  * Copyright (C) 2011 New Dream Network
+ * Copyright (C) 2013,2014 Cloudwatt <libre.licensing@cloudwatt.com>
+ *
+ * Author: Loic Dachary <loic@dachary.org>
  *
  * This is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -19,6 +22,76 @@ extern "C" {
 }
 #include "PG.h"
 #include "OSDMap.h"
+#include "PGBackend.h"
+
+const char *ceph_osd_flag_name(unsigned flag)
+{
+  switch (flag) {
+  case CEPH_OSD_FLAG_ACK: return "ack";
+  case CEPH_OSD_FLAG_ONNVRAM: return "onnvram";
+  case CEPH_OSD_FLAG_ONDISK: return "ondisk";
+  case CEPH_OSD_FLAG_RETRY: return "retry";
+  case CEPH_OSD_FLAG_READ: return "read";
+  case CEPH_OSD_FLAG_WRITE: return "write";
+  case CEPH_OSD_FLAG_ORDERSNAP: return "ordersnap";
+  case CEPH_OSD_FLAG_PEERSTAT_OLD: return "peerstat_old";
+  case CEPH_OSD_FLAG_BALANCE_READS: return "balance_reads";
+  case CEPH_OSD_FLAG_PARALLELEXEC: return "parallelexec";
+  case CEPH_OSD_FLAG_PGOP: return "pgop";
+  case CEPH_OSD_FLAG_EXEC: return "exec";
+  case CEPH_OSD_FLAG_EXEC_PUBLIC: return "exec_public";
+  case CEPH_OSD_FLAG_LOCALIZE_READS: return "localize_reads";
+  case CEPH_OSD_FLAG_RWORDERED: return "rwordered";
+  case CEPH_OSD_FLAG_IGNORE_CACHE: return "ignore_cache";
+  case CEPH_OSD_FLAG_SKIPRWLOCKS: return "skiprwlocks";
+  case CEPH_OSD_FLAG_IGNORE_OVERLAY: return "ignore_overlay";
+  case CEPH_OSD_FLAG_FLUSH: return "flush";
+  case CEPH_OSD_FLAG_MAP_SNAP_CLONE: return "map_snap_clone";
+  case CEPH_OSD_FLAG_ENFORCE_SNAPC: return "enforce_snapc";
+  case CEPH_OSD_FLAG_REDIRECTED: return "redirected";
+  case CEPH_OSD_FLAG_KNOWN_REDIR: return "known_if_redirected";
+  default: return "???";
+  }
+}
+
+string ceph_osd_flag_string(unsigned flags)
+{
+  string s;
+  for (unsigned i=0; i<32; ++i) {
+    if (flags & (1u<<i)) {
+      if (s.length())
+	s += "+";
+      s += ceph_osd_flag_name(1u << i);
+    }
+  }
+  if (s.length())
+    return s;
+  return string("-");
+}
+
+void pg_shard_t::encode(bufferlist &bl) const
+{
+  ENCODE_START(1, 1, bl);
+  ::encode(osd, bl);
+  ::encode(shard, bl);
+  ENCODE_FINISH(bl);
+}
+void pg_shard_t::decode(bufferlist::iterator &bl)
+{
+  DECODE_START(1, bl);
+  ::decode(osd, bl);
+  ::decode(shard, bl);
+  DECODE_FINISH(bl);
+}
+
+ostream &operator<<(ostream &lhs, const pg_shard_t &rhs)
+{
+  if (rhs.is_undefined())
+    return lhs << "?";
+  if (rhs.shard == shard_id_t::NO_SHARD)
+    return lhs << rhs.osd;
+  return lhs << rhs.osd << '(' << (unsigned)(rhs.shard) << ')';
+}
 
 // -- osd_reqid_t --
 void osd_reqid_t::encode(bufferlist &bl) const
@@ -151,47 +224,13 @@ void request_redirect_t::generate_test_instances(list<request_redirect_t*>& o)
   o.push_back(new request_redirect_t(loc));
 }
 
-// -- pow2_hist_t --
-void pow2_hist_t::dump(Formatter *f) const
-{
-  f->open_array_section("histogram");
-  for (vector<int>::const_iterator p = h.begin(); p != h.end(); ++p)
-    f->dump_int("count", *p);
-  f->close_section();
-  f->dump_int("upper_bound", upper_bound());
-}
-
-void pow2_hist_t::encode(bufferlist& bl) const
-{
-  ENCODE_START(1, 1, bl);
-  ::encode(h, bl);
-  ENCODE_FINISH(bl);
-}
-
-void pow2_hist_t::decode(bufferlist::iterator& p)
-{
-  DECODE_START(1, p);
-  ::decode(h, p);
-  DECODE_FINISH(p);
-}
-
-void pow2_hist_t::generate_test_instances(list<pow2_hist_t*>& ls)
-{
-  ls.push_back(new pow2_hist_t);
-  ls.push_back(new pow2_hist_t);
-  ls.back()->h.push_back(1);
-  ls.back()->h.push_back(3);
-  ls.back()->h.push_back(0);
-  ls.back()->h.push_back(2);
-}
-
-void filestore_perf_stat_t::dump(Formatter *f) const
+void objectstore_perf_stat_t::dump(Formatter *f) const
 {
   f->dump_unsigned("commit_latency_ms", filestore_commit_latency);
   f->dump_unsigned("apply_latency_ms", filestore_apply_latency);
 }
 
-void filestore_perf_stat_t::encode(bufferlist &bl) const
+void objectstore_perf_stat_t::encode(bufferlist &bl) const
 {
   ENCODE_START(1, 1, bl);
   ::encode(filestore_commit_latency, bl);
@@ -199,7 +238,7 @@ void filestore_perf_stat_t::encode(bufferlist &bl) const
   ENCODE_FINISH(bl);
 }
 
-void filestore_perf_stat_t::decode(bufferlist::iterator &bl)
+void objectstore_perf_stat_t::decode(bufferlist::iterator &bl)
 {
   DECODE_START(1, bl);
   ::decode(filestore_commit_latency, bl);
@@ -207,10 +246,10 @@ void filestore_perf_stat_t::decode(bufferlist::iterator &bl)
   DECODE_FINISH(bl);
 }
 
-void filestore_perf_stat_t::generate_test_instances(std::list<filestore_perf_stat_t*>& o)
+void objectstore_perf_stat_t::generate_test_instances(std::list<objectstore_perf_stat_t*>& o)
 {
-  o.push_back(new filestore_perf_stat_t());
-  o.push_back(new filestore_perf_stat_t());
+  o.push_back(new objectstore_perf_stat_t());
+  o.push_back(new objectstore_perf_stat_t());
   o.back()->filestore_commit_latency = 20;
   o.back()->filestore_apply_latency = 30;
 }
@@ -314,6 +353,59 @@ bool pg_t::parse(const char *s)
   return true;
 }
 
+bool spg_t::parse(const char *s)
+{
+  pgid.set_preferred(-1);
+  shard = shard_id_t::NO_SHARD;
+  uint64_t ppool;
+  uint32_t pseed;
+  int32_t pref;
+  uint32_t pshard;
+  int r = sscanf(s, "%llu.%x", (long long unsigned *)&ppool, &pseed);
+  if (r < 2)
+    return false;
+  pgid.set_pool(ppool);
+  pgid.set_ps(pseed);
+
+  const char *p = strchr(s, 'p');
+  if (p) {
+    r = sscanf(p, "p%d", &pref);
+    if (r == 1) {
+      pgid.set_preferred(pref);
+    } else {
+      return false;
+    }
+  }
+
+  p = strchr(s, 's');
+  if (p) {
+    r = sscanf(p, "s%d", &pshard);
+    if (r == 1) {
+      shard = shard_id_t(pshard);
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+ostream& operator<<(ostream& out, const spg_t &pg)
+{
+  out << pg.pgid;
+  if (!pg.is_no_shard())
+    out << "s" << (unsigned)pg.shard;
+  return out;
+}
+
+pg_t pg_t::get_ancestor(unsigned old_pg_num) const
+{
+  int old_bits = pg_pool_t::calc_bits_of(old_pg_num);
+  int old_mask = (1 << old_bits) - 1;
+  pg_t ret = *this;
+  ret.m_seed = ceph_stable_mod(m_seed, old_pg_num, old_mask);
+  return ret;
+}
+
 bool pg_t::is_split(unsigned old_pg_num, unsigned new_pg_num, set<pg_t> *children) const
 {
   assert(m_seed < old_pg_num);
@@ -361,6 +453,7 @@ unsigned pg_t::get_split_bits(unsigned pg_num) const {
 
   // Find unique p such that pg_num \in [2^(p-1), 2^p)
   unsigned p = pg_pool_t::calc_bits_of(pg_num);
+  assert(p); // silence coverity #751330 
 
   if ((m_seed % (1<<(p-1))) < (pg_num % (1<<(p-1))))
     return p;
@@ -409,7 +502,7 @@ ostream& operator<<(ostream& out, const pg_t &pg)
 
 const coll_t coll_t::META_COLL("meta");
 
-bool coll_t::is_temp(pg_t& pgid) const
+bool coll_t::is_temp(spg_t& pgid) const
 {
   const char *cstr(str.c_str());
   if (!pgid.parse(cstr))
@@ -422,7 +515,7 @@ bool coll_t::is_temp(pg_t& pgid) const
   return false;
 }
 
-bool coll_t::is_pg(pg_t& pgid, snapid_t& snap) const
+bool coll_t::is_pg(spg_t& pgid, snapid_t& snap) const
 {
   const char *cstr(str.c_str());
 
@@ -442,7 +535,7 @@ bool coll_t::is_pg(pg_t& pgid, snapid_t& snap) const
   return true;
 }
 
-bool coll_t::is_pg_prefix(pg_t& pgid) const
+bool coll_t::is_pg_prefix(spg_t& pgid) const
 {
   const char *cstr(str.c_str());
 
@@ -454,7 +547,7 @@ bool coll_t::is_pg_prefix(pg_t& pgid) const
   return true;
 }
 
-bool coll_t::is_removal(uint64_t *seq, pg_t *pgid) const
+bool coll_t::is_removal(uint64_t *seq, spg_t *pgid) const
 {
   if (str.substr(0, 11) != string("FORREMOVAL_"))
     return false;
@@ -486,13 +579,13 @@ void coll_t::decode(bufferlist::iterator& bl)
   ::decode(struct_v, bl);
   switch (struct_v) {
   case 1: {
-    pg_t pgid;
+    spg_t pgid;
     snapid_t snap;
 
     ::decode(pgid, bl);
     ::decode(snap, bl);
     // infer the type
-    if (pgid == pg_t() && snap == 0)
+    if (pgid == spg_t() && snap == 0)
       str = "meta";
     else
       str = pg_and_snap_to_str(pgid, snap);
@@ -501,7 +594,7 @@ void coll_t::decode(bufferlist::iterator& bl)
 
   case 2: {
     __u8 type;
-    pg_t pgid;
+    spg_t pgid;
     snapid_t snap;
     
     ::decode(type, bl);
@@ -576,6 +669,8 @@ std::string pg_state_string(int state)
     oss << "replay+";
   if (state & PG_STATE_SPLITTING)
     oss << "splitting+";
+  if (state & PG_STATE_UNDERSIZED)
+    oss << "undersized+";
   if (state & PG_STATE_DEGRADED)
     oss << "degraded+";
   if (state & PG_STATE_REMAPPED)
@@ -679,6 +774,7 @@ void pg_pool_t::dump(Formatter *f) const
   f->dump_int("pg_placement_num", get_pgp_num());
   f->dump_unsigned("crash_replay_interval", get_crash_replay_interval());
   f->dump_stream("last_change") << get_last_change();
+  f->dump_stream("last_force_op_resend") << get_last_force_op_resend();
   f->dump_unsigned("auid", get_auid());
   f->dump_string("snap_mode", is_pool_snaps_mode() ? "pool" : "selfmanaged");
   f->dump_unsigned("snap_seq", get_snap_seq());
@@ -701,19 +797,23 @@ void pg_pool_t::dump(Formatter *f) const
   f->dump_int("read_tier", read_tier);
   f->dump_int("write_tier", write_tier);
   f->dump_string("cache_mode", get_cache_mode_name());
-  f->open_array_section("properties");
-  for (map<string,string>::const_iterator i = properties.begin();
-       i != properties.end();
-       ++i) {
-    string name = i->first;
-    f->dump_string(name.c_str(), i->second);
-  }
-  f->close_section();
+  f->dump_unsigned("target_max_bytes", target_max_bytes);
+  f->dump_unsigned("target_max_objects", target_max_objects);
+  f->dump_unsigned("cache_target_dirty_ratio_micro",
+		   cache_target_dirty_ratio_micro);
+  f->dump_unsigned("cache_target_full_ratio_micro",
+		   cache_target_full_ratio_micro);
+  f->dump_unsigned("cache_min_flush_age", cache_min_flush_age);
+  f->dump_unsigned("cache_min_evict_age", cache_min_evict_age);
+  f->dump_string("erasure_code_profile", erasure_code_profile);
   f->open_object_section("hit_set_params");
   hit_set_params.dump(f);
   f->close_section(); // hit_set_params
   f->dump_unsigned("hit_set_period", hit_set_period);
   f->dump_unsigned("hit_set_count", hit_set_count);
+  f->dump_unsigned("min_read_recency_for_promote", min_read_recency_for_promote);
+  f->dump_unsigned("stripe_width", get_stripe_width());
+  f->dump_unsigned("expected_num_objects", expected_num_objects);
 }
 
 
@@ -731,6 +831,17 @@ void pg_pool_t::calc_pg_masks()
 {
   pg_num_mask = (1 << calc_bits_of(pg_num-1)) - 1;
   pgp_num_mask = (1 << calc_bits_of(pgp_num-1)) - 1;
+}
+
+unsigned pg_pool_t::get_pg_num_divisor(pg_t pgid) const
+{
+  if (pg_num == pg_num_mask + 1)
+    return pg_num;                    // power-of-2 split
+  unsigned mask = pg_num_mask >> 1;
+  if ((pgid.ps() & mask) < (pg_num & mask))
+    return pg_num_mask + 1;           // smaller bin size (already split)
+  else
+    return (pg_num_mask + 1) >> 1;    // bigger bin (not yet split)
 }
 
 /*
@@ -882,6 +993,23 @@ ps_t pg_pool_t::raw_pg_to_pps(pg_t pg) const
   }
 }
 
+uint32_t pg_pool_t::get_random_pg_position(pg_t pg, uint32_t seed) const
+{
+  uint32_t r = crush_hash32_2(CRUSH_HASH_RJENKINS1, seed, 123);
+  if (pg_num == pg_num_mask + 1) {
+    r &= ~pg_num_mask;
+  } else {
+    unsigned smaller_mask = pg_num_mask >> 1;
+    if ((pg.ps() & smaller_mask) < (pg_num & smaller_mask)) {
+      r &= ~pg_num_mask;
+    } else {
+      r &= ~smaller_mask;
+    }
+  }
+  r |= pg.ps();
+  return r;
+}
+
 void pg_pool_t::encode(bufferlist& bl, uint64_t features) const
 {
   if ((features & CEPH_FEATURE_PGPOOL3) == 0) {
@@ -936,8 +1064,56 @@ void pg_pool_t::encode(bufferlist& bl, uint64_t features) const
     return;
   }
 
-  __u8 encode_compat = 5;
-  ENCODE_START(11, encode_compat, bl);
+  if ((features & CEPH_FEATURE_OSD_POOLRESEND) == 0) {
+    // we simply added last_force_op_resend here, which is a fully
+    // backward compatible change.  however, encoding the same map
+    // differently between monitors triggers scrub noise (even though
+    // they are decodable without the feature), so let's be pendantic
+    // about it.
+    ENCODE_START(14, 5, bl);
+    ::encode(type, bl);
+    ::encode(size, bl);
+    ::encode(crush_ruleset, bl);
+    ::encode(object_hash, bl);
+    ::encode(pg_num, bl);
+    ::encode(pgp_num, bl);
+    __u32 lpg_num = 0, lpgp_num = 0;  // tell old code that there are no localized pgs.
+    ::encode(lpg_num, bl);
+    ::encode(lpgp_num, bl);
+    ::encode(last_change, bl);
+    ::encode(snap_seq, bl);
+    ::encode(snap_epoch, bl);
+    ::encode(snaps, bl, features);
+    ::encode(removed_snaps, bl);
+    ::encode(auid, bl);
+    ::encode(flags, bl);
+    ::encode(crash_replay_interval, bl);
+    ::encode(min_size, bl);
+    ::encode(quota_max_bytes, bl);
+    ::encode(quota_max_objects, bl);
+    ::encode(tiers, bl);
+    ::encode(tier_of, bl);
+    __u8 c = cache_mode;
+    ::encode(c, bl);
+    ::encode(read_tier, bl);
+    ::encode(write_tier, bl);
+    ::encode(properties, bl);
+    ::encode(hit_set_params, bl);
+    ::encode(hit_set_period, bl);
+    ::encode(hit_set_count, bl);
+    ::encode(stripe_width, bl);
+    ::encode(target_max_bytes, bl);
+    ::encode(target_max_objects, bl);
+    ::encode(cache_target_dirty_ratio_micro, bl);
+    ::encode(cache_target_full_ratio_micro, bl);
+    ::encode(cache_min_flush_age, bl);
+    ::encode(cache_min_evict_age, bl);
+    ::encode(erasure_code_profile, bl);
+    ENCODE_FINISH(bl);
+    return;
+  }
+
+  ENCODE_START(17, 5, bl);
   ::encode(type, bl);
   ::encode(size, bl);
   ::encode(crush_ruleset, bl);
@@ -965,17 +1141,26 @@ void pg_pool_t::encode(bufferlist& bl, uint64_t features) const
   ::encode(read_tier, bl);
   ::encode(write_tier, bl);
   ::encode(properties, bl);
-  if (hit_set_params.get_type() != HitSet::TYPE_NONE)
-    encode_compat = MAX(encode_compat, 11); // need to be able to understand all the data!
   ::encode(hit_set_params, bl);
   ::encode(hit_set_period, bl);
   ::encode(hit_set_count, bl);
-  ENCODE_FINISH_NEW_COMPAT(bl, encode_compat);
+  ::encode(stripe_width, bl);
+  ::encode(target_max_bytes, bl);
+  ::encode(target_max_objects, bl);
+  ::encode(cache_target_dirty_ratio_micro, bl);
+  ::encode(cache_target_full_ratio_micro, bl);
+  ::encode(cache_min_flush_age, bl);
+  ::encode(cache_min_evict_age, bl);
+  ::encode(erasure_code_profile, bl);
+  ::encode(last_force_op_resend, bl);
+  ::encode(min_read_recency_for_promote, bl);
+  ::encode(expected_num_objects, bl);
+  ENCODE_FINISH(bl);
 }
 
 void pg_pool_t::decode(bufferlist::iterator& bl)
 {
-  DECODE_START_LEGACY_COMPAT_LEN(11, 5, 5, bl);
+  DECODE_START_LEGACY_COMPAT_LEN(17, 5, 5, bl);
   ::decode(type, bl);
   ::decode(size, bl);
   ::decode(crush_ruleset, bl);
@@ -1049,6 +1234,45 @@ void pg_pool_t::decode(bufferlist::iterator& bl)
     hit_set_period = def.hit_set_period;
     hit_set_count = def.hit_set_count;
   }
+  if (struct_v >= 12) {
+    ::decode(stripe_width, bl);
+  } else {
+    set_stripe_width(0);
+  }
+  if (struct_v >= 13) {
+    ::decode(target_max_bytes, bl);
+    ::decode(target_max_objects, bl);
+    ::decode(cache_target_dirty_ratio_micro, bl);
+    ::decode(cache_target_full_ratio_micro, bl);
+    ::decode(cache_min_flush_age, bl);
+    ::decode(cache_min_evict_age, bl);
+  } else {
+    target_max_bytes = 0;
+    target_max_objects = 0;
+    cache_target_dirty_ratio_micro = 0;
+    cache_target_full_ratio_micro = 0;
+    cache_min_flush_age = 0;
+    cache_min_evict_age = 0;
+  }
+  if (struct_v >= 14) {
+    ::decode(erasure_code_profile, bl);
+  }
+  if (struct_v >= 15) {
+    ::decode(last_force_op_resend, bl);
+  } else {
+    last_force_op_resend = 0;
+  }
+  if (struct_v >= 16) {
+    ::decode(min_read_recency_for_promote, bl);
+  } else {
+    pg_pool_t def;
+    min_read_recency_for_promote = def.min_read_recency_for_promote;
+  }
+  if (struct_v >= 17) {
+    ::decode(expected_num_objects, bl);
+  } else {
+    expected_num_objects = 0;
+  }
   DECODE_FINISH(bl);
   calc_pg_masks();
 }
@@ -1058,13 +1282,14 @@ void pg_pool_t::generate_test_instances(list<pg_pool_t*>& o)
   pg_pool_t a;
   o.push_back(new pg_pool_t(a));
 
-  a.type = TYPE_REP;
+  a.type = TYPE_REPLICATED;
   a.size = 2;
   a.crush_ruleset = 3;
   a.object_hash = 4;
   a.pg_num = 6;
   a.pgp_num = 5;
   a.last_change = 9;
+  a.last_force_op_resend = 123823;
   a.snap_seq = 10;
   a.snap_epoch = 11;
   a.auid = 12;
@@ -1090,11 +1315,19 @@ void pg_pool_t::generate_test_instances(list<pg_pool_t*>& o)
   a.cache_mode = CACHEMODE_WRITEBACK;
   a.read_tier = 1;
   a.write_tier = 1;
-  a.properties["p-1"] = "v-1";
-  a.properties["empty"] = string();
   a.hit_set_params = HitSet::Params(new BloomHitSet::Params);
   a.hit_set_period = 3600;
   a.hit_set_count = 8;
+  a.min_read_recency_for_promote = 1;
+  a.set_stripe_width(12345);
+  a.target_max_bytes = 1238132132;
+  a.target_max_objects = 1232132;
+  a.cache_target_dirty_ratio_micro = 187232;
+  a.cache_target_full_ratio_micro = 987222;
+  a.cache_min_flush_age = 231;
+  a.cache_min_evict_age = 2321;
+  a.erasure_code_profile = "profile in osdmap";
+  a.expected_num_objects = 123456;
   o.push_back(new pg_pool_t(a));
 }
 
@@ -1107,8 +1340,11 @@ ostream& operator<<(ostream& out, const pg_pool_t& p)
       << " object_hash " << p.get_object_hash_name()
       << " pg_num " << p.get_pg_num()
       << " pgp_num " << p.get_pgp_num()
-      << " last_change " << p.get_last_change()
-      << " owner " << p.get_auid();
+      << " last_change " << p.get_last_change();
+  if (p.get_last_force_op_resend())
+    out << " lfor " << p.get_last_force_op_resend();
+  if (p.get_auid())
+    out << " owner " << p.get_auid();
   if (p.flags)
     out << " flags " << p.get_flags_string();
   if (p.crash_replay_interval)
@@ -1127,11 +1363,20 @@ ostream& operator<<(ostream& out, const pg_pool_t& p)
     out << " write_tier " << p.write_tier;
   if (p.cache_mode)
     out << " cache_mode " << p.get_cache_mode_name();
+  if (p.target_max_bytes)
+    out << " target_bytes " << p.target_max_bytes;
+  if (p.target_max_objects)
+    out << " target_objects " << p.target_max_objects;
   if (p.hit_set_params.get_type() != HitSet::TYPE_NONE) {
     out << " hit_set " << p.hit_set_params
 	<< " " << p.hit_set_period << "s"
 	<< " x" << p.hit_set_count;
   }
+  if (p.min_read_recency_for_promote)
+    out << " min_read_recency_for_promote " << p.min_read_recency_for_promote;
+  out << " stripe_width " << p.get_stripe_width();
+  if (p.expected_num_objects)
+    out << " expected_num_objects " << p.expected_num_objects;
   return out;
 }
 
@@ -1146,7 +1391,10 @@ void object_stat_sum_t::dump(Formatter *f) const
   f->dump_int("num_object_copies", num_object_copies);
   f->dump_int("num_objects_missing_on_primary", num_objects_missing_on_primary);
   f->dump_int("num_objects_degraded", num_objects_degraded);
+  f->dump_int("num_objects_misplaced", num_objects_misplaced);
   f->dump_int("num_objects_unfound", num_objects_unfound);
+  f->dump_int("num_objects_dirty", num_objects_dirty);
+  f->dump_int("num_whiteouts", num_whiteouts);
   f->dump_int("num_read", num_rd);
   f->dump_int("num_read_kb", num_rd_kb);
   f->dump_int("num_write", num_wr);
@@ -1157,11 +1405,13 @@ void object_stat_sum_t::dump(Formatter *f) const
   f->dump_int("num_objects_recovered", num_objects_recovered);
   f->dump_int("num_bytes_recovered", num_bytes_recovered);
   f->dump_int("num_keys_recovered", num_keys_recovered);
+  f->dump_int("num_objects_omap", num_objects_omap);
+  f->dump_int("num_objects_hit_set_archive", num_objects_hit_set_archive);
 }
 
 void object_stat_sum_t::encode(bufferlist& bl) const
 {
-  ENCODE_START(6, 3, bl);
+  ENCODE_START(10, 3, bl);
   ::encode(num_bytes, bl);
   ::encode(num_objects, bl);
   ::encode(num_object_clones, bl);
@@ -1179,12 +1429,17 @@ void object_stat_sum_t::encode(bufferlist& bl) const
   ::encode(num_keys_recovered, bl);
   ::encode(num_shallow_scrub_errors, bl);
   ::encode(num_deep_scrub_errors, bl);
+  ::encode(num_objects_dirty, bl);
+  ::encode(num_whiteouts, bl);
+  ::encode(num_objects_omap, bl);
+  ::encode(num_objects_hit_set_archive, bl);
+  ::encode(num_objects_misplaced, bl);
   ENCODE_FINISH(bl);
 }
 
 void object_stat_sum_t::decode(bufferlist::iterator& bl)
 {
-  DECODE_START_LEGACY_COMPAT_LEN(6, 3, 3, bl);
+  DECODE_START_LEGACY_COMPAT_LEN(10, 3, 3, bl);
   ::decode(num_bytes, bl);
   if (struct_v < 3) {
     uint64_t num_kb;
@@ -1221,6 +1476,28 @@ void object_stat_sum_t::decode(bufferlist::iterator& bl)
     num_shallow_scrub_errors = 0;
     num_deep_scrub_errors = 0;
   }
+  if (struct_v >= 7) {
+    ::decode(num_objects_dirty, bl);
+    ::decode(num_whiteouts, bl);
+  } else {
+    num_objects_dirty = 0;
+    num_whiteouts = 0;
+  }
+  if (struct_v >= 8) {
+    ::decode(num_objects_omap, bl);
+  } else {
+    num_objects_omap = 0;
+  }
+  if (struct_v >= 9) {
+    ::decode(num_objects_hit_set_archive, bl);
+  } else {
+    num_objects_hit_set_archive = 0;
+  }
+  if (struct_v >= 10) {
+    ::decode(num_objects_misplaced, bl);
+  } else {
+    num_objects_misplaced = 0;
+  }
   DECODE_FINISH(bl);
 }
 
@@ -1244,6 +1521,9 @@ void object_stat_sum_t::generate_test_instances(list<object_stat_sum_t*>& o)
   a.num_deep_scrub_errors = 17;
   a.num_shallow_scrub_errors = 18;
   a.num_scrub_errors = a.num_deep_scrub_errors + a.num_shallow_scrub_errors;
+  a.num_objects_dirty = 21;
+  a.num_whiteouts = 22;
+  a.num_objects_misplaced = 1232;
   o.push_back(new object_stat_sum_t(a));
 }
 
@@ -1255,6 +1535,7 @@ void object_stat_sum_t::add(const object_stat_sum_t& o)
   num_object_copies += o.num_object_copies;
   num_objects_missing_on_primary += o.num_objects_missing_on_primary;
   num_objects_degraded += o.num_objects_degraded;
+  num_objects_misplaced += o.num_objects_misplaced;
   num_rd += o.num_rd;
   num_rd_kb += o.num_rd_kb;
   num_wr += o.num_wr;
@@ -1266,6 +1547,10 @@ void object_stat_sum_t::add(const object_stat_sum_t& o)
   num_objects_recovered += o.num_objects_recovered;
   num_bytes_recovered += o.num_bytes_recovered;
   num_keys_recovered += o.num_keys_recovered;
+  num_objects_dirty += o.num_objects_dirty;
+  num_whiteouts += o.num_whiteouts;
+  num_objects_omap += o.num_objects_omap;
+  num_objects_hit_set_archive += o.num_objects_hit_set_archive;
 }
 
 void object_stat_sum_t::sub(const object_stat_sum_t& o)
@@ -1276,6 +1561,7 @@ void object_stat_sum_t::sub(const object_stat_sum_t& o)
   num_object_copies -= o.num_object_copies;
   num_objects_missing_on_primary -= o.num_objects_missing_on_primary;
   num_objects_degraded -= o.num_objects_degraded;
+  num_objects_misplaced -= o.num_objects_misplaced;
   num_rd -= o.num_rd;
   num_rd_kb -= o.num_rd_kb;
   num_wr -= o.num_wr;
@@ -1287,6 +1573,10 @@ void object_stat_sum_t::sub(const object_stat_sum_t& o)
   num_objects_recovered -= o.num_objects_recovered;
   num_bytes_recovered -= o.num_bytes_recovered;
   num_keys_recovered -= o.num_keys_recovered;
+  num_objects_dirty -= o.num_objects_dirty;
+  num_whiteouts -= o.num_whiteouts;
+  num_objects_omap -= o.num_objects_omap;
+  num_objects_hit_set_archive -= o.num_objects_hit_set_archive;
 }
 
 
@@ -1351,6 +1641,8 @@ void pg_stat_t::dump(Formatter *f) const
   f->dump_stream("last_clean") << last_clean;
   f->dump_stream("last_became_active") << last_became_active;
   f->dump_stream("last_unstale") << last_unstale;
+  f->dump_stream("last_undegraded") << last_undegraded;
+  f->dump_stream("last_fullsized") << last_fullsized;
   f->dump_unsigned("mapping_epoch", mapping_epoch);
   f->dump_stream("log_start") << log_start;
   f->dump_stream("ondisk_log_start") << ondisk_log_start;
@@ -1368,31 +1660,40 @@ void pg_stat_t::dump(Formatter *f) const
   f->dump_stream("stats_invalid") << stats_invalid;
   stats.dump(f);
   f->open_array_section("up");
-  for (vector<int>::const_iterator p = up.begin(); p != up.end(); ++p)
+  for (vector<int32_t>::const_iterator p = up.begin(); p != up.end(); ++p)
     f->dump_int("osd", *p);
   f->close_section();
   f->open_array_section("acting");
-  for (vector<int>::const_iterator p = acting.begin(); p != acting.end(); ++p)
+  for (vector<int32_t>::const_iterator p = acting.begin(); p != acting.end(); ++p)
     f->dump_int("osd", *p);
   f->close_section();
+  f->open_array_section("blocked_by");
+  for (vector<int32_t>::const_iterator p = blocked_by.begin();
+       p != blocked_by.end(); ++p)
+    f->dump_int("osd", *p);
+  f->close_section();
+  f->dump_int("up_primary", up_primary);
+  f->dump_int("acting_primary", acting_primary);
 }
 
 void pg_stat_t::dump_brief(Formatter *f) const
 {
   f->dump_string("state", pg_state_string(state));
   f->open_array_section("up");
-  for (vector<int>::const_iterator p = up.begin(); p != up.end(); ++p)
+  for (vector<int32_t>::const_iterator p = up.begin(); p != up.end(); ++p)
     f->dump_int("osd", *p);
   f->close_section();
   f->open_array_section("acting");
-  for (vector<int>::const_iterator p = acting.begin(); p != acting.end(); ++p)
+  for (vector<int32_t>::const_iterator p = acting.begin(); p != acting.end(); ++p)
     f->dump_int("osd", *p);
   f->close_section();
+  f->dump_int("up_primary", up_primary);
+  f->dump_int("acting_primary", acting_primary);
 }
 
 void pg_stat_t::encode(bufferlist &bl) const
 {
-  ENCODE_START(13, 8, bl);
+  ENCODE_START(19, 8, bl);
   ::encode(version, bl);
   ::encode(reported_seq, bl);
   ::encode(reported_epoch, bl);
@@ -1421,12 +1722,20 @@ void pg_stat_t::encode(bufferlist &bl) const
   ::encode(stats_invalid, bl);
   ::encode(last_clean_scrub_stamp, bl);
   ::encode(last_became_active, bl);
+  ::encode(dirty_stats_invalid, bl);
+  ::encode(up_primary, bl);
+  ::encode(acting_primary, bl);
+  ::encode(omap_stats_invalid, bl);
+  ::encode(hitset_stats_invalid, bl);
+  ::encode(blocked_by, bl);
+  ::encode(last_undegraded, bl);
+  ::encode(last_fullsized, bl);
   ENCODE_FINISH(bl);
 }
 
 void pg_stat_t::decode(bufferlist::iterator &bl)
 {
-  DECODE_START_LEGACY_COMPAT_LEN(13, 8, 8, bl);
+  DECODE_START_LEGACY_COMPAT_LEN(19, 8, 8, bl);
   ::decode(version, bl);
   ::decode(reported_seq, bl);
   ::decode(reported_epoch, bl);
@@ -1506,6 +1815,46 @@ void pg_stat_t::decode(bufferlist::iterator &bl)
   } else {
     last_became_active = last_active;
   }
+  if (struct_v >= 14) {
+    ::decode(dirty_stats_invalid, bl);
+  } else {
+    // if we are decoding an old encoding of this object, then the
+    // encoder may not have supported num_objects_dirty accounting.
+    dirty_stats_invalid = true;
+  }
+  if (struct_v >= 15) {
+    ::decode(up_primary, bl);
+    ::decode(acting_primary, bl);
+  } else {
+    up_primary = up.size() ? up[0] : -1;
+    acting_primary = acting.size() ? acting[0] : -1;
+  }
+  if (struct_v >= 16) {
+    ::decode(omap_stats_invalid, bl);
+  } else {
+    // if we are decoding an old encoding of this object, then the
+    // encoder may not have supported num_objects_omap accounting.
+    omap_stats_invalid = true;
+  }
+  if (struct_v >= 17) {
+    ::decode(hitset_stats_invalid, bl);
+  } else {
+    // if we are decoding an old encoding of this object, then the
+    // encoder may not have supported num_objects_hit_set_archive accounting.
+    hitset_stats_invalid = true;
+  }
+  if (struct_v >= 18) {
+    ::decode(blocked_by, bl);
+  } else {
+    blocked_by.clear();
+  }
+  if (struct_v >= 19) {
+    ::decode(last_undegraded, bl);
+    ::decode(last_fullsized, bl);
+  } else {
+    last_undegraded = utime_t();
+    last_fullsized = utime_t();
+  }
   DECODE_FINISH(bl);
 }
 
@@ -1524,6 +1873,8 @@ void pg_stat_t::generate_test_instances(list<pg_stat_t*>& o)
   a.last_active = utime_t(1002, 3);
   a.last_clean = utime_t(1002, 4);
   a.last_unstale = utime_t(1002, 5);
+  a.last_undegraded = utime_t(1002, 7);
+  a.last_fullsized = utime_t(1002, 8);
   a.log_start = eversion_t(1, 4);
   a.ondisk_log_start = eversion_t(1, 5);
   a.created = 6;
@@ -1541,7 +1892,17 @@ void pg_stat_t::generate_test_instances(list<pg_stat_t*>& o)
   a.log_size = 99;
   a.ondisk_log_size = 88;
   a.up.push_back(123);
+  a.up_primary = 123;
   a.acting.push_back(456);
+  a.acting_primary = 456;
+  o.push_back(new pg_stat_t(a));
+
+  a.up.push_back(124);
+  a.up_primary = 124;
+  a.acting.push_back(124);
+  a.acting_primary = 124;
+  a.blocked_by.push_back(155);
+  a.blocked_by.push_back(156);
   o.push_back(new pg_stat_t(a));
 }
 
@@ -1704,8 +2065,8 @@ void pg_history_t::generate_test_instances(list<pg_history_t*>& o)
 
 void pg_info_t::encode(bufferlist &bl) const
 {
-  ENCODE_START(29, 26, bl);
-  ::encode(pgid, bl);
+  ENCODE_START(30, 26, bl);
+  ::encode(pgid.pgid, bl);
   ::encode(last_update, bl);
   ::encode(last_complete, bl);
   ::encode(log_tail, bl);
@@ -1716,6 +2077,7 @@ void pg_info_t::encode(bufferlist &bl) const
   ::encode(last_epoch_started, bl);
   ::encode(last_user_version, bl);
   ::encode(hit_set, bl);
+  ::encode(pgid.shard, bl);
   ENCODE_FINISH(bl);
 }
 
@@ -1725,9 +2087,9 @@ void pg_info_t::decode(bufferlist::iterator &bl)
   if (struct_v < 23) {
     old_pg_t opgid;
     ::decode(opgid, bl);
-    pgid = opgid;
+    pgid.pgid = opgid;
   } else {
-    ::decode(pgid, bl);
+    ::decode(pgid.pgid, bl);
   }
   ::decode(last_update, bl);
   ::decode(last_complete, bl);
@@ -1757,6 +2119,10 @@ void pg_info_t::decode(bufferlist::iterator &bl)
     last_user_version = last_update.version;
   if (struct_v >= 29)
     ::decode(hit_set, bl);
+  if (struct_v >= 30)
+    ::decode(pgid.shard, bl);
+  else
+    pgid.shard = shard_id_t::NO_SHARD;
   DECODE_FINISH(bl);
 }
 
@@ -1795,7 +2161,7 @@ void pg_info_t::generate_test_instances(list<pg_info_t*>& o)
   list<pg_history_t*> h;
   pg_history_t::generate_test_instances(h);
   o.back()->history = *h.back();
-  o.back()->pgid = pg_t(1, 2, -1);
+  o.back()->pgid = spg_t(pg_t(1, 2, -1), shard_id_t::NO_SHARD);
   o.back()->last_update = eversion_t(3, 4);
   o.back()->last_complete = eversion_t(5, 6);
   o.back()->last_user_version = 2;
@@ -1816,26 +2182,37 @@ void pg_info_t::generate_test_instances(list<pg_info_t*>& o)
 // -- pg_notify_t --
 void pg_notify_t::encode(bufferlist &bl) const
 {
-  ENCODE_START(1, 1, bl);
+  ENCODE_START(2, 1, bl);
   ::encode(query_epoch, bl);
   ::encode(epoch_sent, bl);
   ::encode(info, bl);
+  ::encode(to, bl);
+  ::encode(from, bl);
   ENCODE_FINISH(bl);
 }
 
 void pg_notify_t::decode(bufferlist::iterator &bl)
 {
-  DECODE_START(1, bl);
+  DECODE_START(2, bl);
   ::decode(query_epoch, bl);
   ::decode(epoch_sent, bl);
   ::decode(info, bl);
+  if (struct_v >= 2) {
+    ::decode(to, bl);
+    ::decode(from, bl);
+  } else {
+    to = shard_id_t::NO_SHARD;
+    from = shard_id_t::NO_SHARD;
+  }
   DECODE_FINISH(bl);
 }
 
 void pg_notify_t::dump(Formatter *f) const
 {
-  f->dump_stream("query_epoch") << query_epoch;
-  f->dump_stream("epoch_sent") << epoch_sent;
+  f->dump_int("from", from);
+  f->dump_int("to", to);
+  f->dump_unsigned("query_epoch", query_epoch);
+  f->dump_unsigned("epoch_sent", epoch_sent);
   {
     f->open_object_section("info");
     info.dump(f);
@@ -1845,38 +2222,57 @@ void pg_notify_t::dump(Formatter *f) const
 
 void pg_notify_t::generate_test_instances(list<pg_notify_t*>& o)
 {
-  o.push_back(new pg_notify_t(1,1,pg_info_t()));
-  o.push_back(new pg_notify_t(3,10,pg_info_t()));
+  o.push_back(new pg_notify_t(shard_id_t(3), shard_id_t::NO_SHARD, 1, 1, pg_info_t()));
+  o.push_back(new pg_notify_t(shard_id_t(0), shard_id_t(0), 3, 10, pg_info_t()));
 }
 
 ostream &operator<<(ostream &lhs, const pg_notify_t &notify)
 {
-  return lhs << "(query_epoch:" << notify.query_epoch
-	     << ", epoch_sent:" << notify.epoch_sent
-	     << ", info:" << notify.info << ")";
+  lhs << "(query_epoch:" << notify.query_epoch
+      << ", epoch_sent:" << notify.epoch_sent
+      << ", info:" << notify.info;
+  if (notify.from != shard_id_t::NO_SHARD ||
+      notify.to != shard_id_t::NO_SHARD)
+    lhs << " " << (unsigned)notify.from
+	<< "->" << (unsigned)notify.to;
+  return lhs << ")";
 }
 
 // -- pg_interval_t --
 
 void pg_interval_t::encode(bufferlist& bl) const
 {
-  ENCODE_START(2, 2, bl);
+  ENCODE_START(4, 2, bl);
   ::encode(first, bl);
   ::encode(last, bl);
   ::encode(up, bl);
   ::encode(acting, bl);
   ::encode(maybe_went_rw, bl);
+  ::encode(primary, bl);
+  ::encode(up_primary, bl);
   ENCODE_FINISH(bl);
 }
 
 void pg_interval_t::decode(bufferlist::iterator& bl)
 {
-  DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, bl);
+  DECODE_START_LEGACY_COMPAT_LEN(4, 2, 2, bl);
   ::decode(first, bl);
   ::decode(last, bl);
   ::decode(up, bl);
   ::decode(acting, bl);
   ::decode(maybe_went_rw, bl);
+  if (struct_v >= 3) {
+    ::decode(primary, bl);
+  } else {
+    if (acting.size())
+      primary = acting[0];
+  }
+  if (struct_v >= 4) {
+    ::decode(up_primary, bl);
+  } else {
+    if (up.size())
+      up_primary = up[0];
+  }
   DECODE_FINISH(bl);
 }
 
@@ -1892,6 +2288,8 @@ void pg_interval_t::dump(Formatter *f) const
   f->open_array_section("acting");
   for (vector<int>::const_iterator p = acting.begin(); p != acting.end(); ++p)
     f->dump_int("osd", *p);
+  f->dump_int("primary", primary);
+  f->dump_int("up_primary", up_primary);
   f->close_section();
 }
 
@@ -1907,50 +2305,87 @@ void pg_interval_t::generate_test_instances(list<pg_interval_t*>& o)
   o.back()->maybe_went_rw = true;
 }
 
-bool pg_interval_t::check_new_interval(
+bool pg_interval_t::is_new_interval(
+  int old_acting_primary,
+  int new_acting_primary,
   const vector<int> &old_acting,
   const vector<int> &new_acting,
+  int old_up_primary,
+  int new_up_primary,
+  const vector<int> &old_up,
+  const vector<int> &new_up,
+  OSDMapRef osdmap,
+  OSDMapRef lastmap,
+  pg_t pgid) {
+  return old_acting_primary != new_acting_primary ||
+    new_acting != old_acting ||
+    old_up_primary != new_up_primary ||
+    new_up != old_up ||
+    (!(lastmap->get_pools().count(pgid.pool()))) ||
+    (lastmap->get_pools().find(pgid.pool())->second.min_size !=
+     osdmap->get_pools().find(pgid.pool())->second.min_size)  ||
+    pgid.is_split(lastmap->get_pg_num(pgid.pool()),
+		  osdmap->get_pg_num(pgid.pool()), 0);
+}
+
+bool pg_interval_t::check_new_interval(
+  int old_acting_primary,
+  int new_acting_primary,
+  const vector<int> &old_acting,
+  const vector<int> &new_acting,
+  int old_up_primary,
+  int new_up_primary,
   const vector<int> &old_up,
   const vector<int> &new_up,
   epoch_t same_interval_since,
   epoch_t last_epoch_clean,
   OSDMapRef osdmap,
   OSDMapRef lastmap,
-  int64_t pool_id,
   pg_t pgid,
   map<epoch_t, pg_interval_t> *past_intervals,
   std::ostream *out)
 {
   // remember past interval
-  if (new_acting != old_acting || new_up != old_up ||
-      (!(lastmap->get_pools().count(pool_id))) ||
-      (lastmap->get_pools().find(pool_id)->second.min_size !=
-       osdmap->get_pools().find(pool_id)->second.min_size)  ||
-      pgid.is_split(lastmap->get_pg_num(pgid.pool()),
-        osdmap->get_pg_num(pgid.pool()), 0)) {
+  //  NOTE: a change in the up set primary triggers an interval
+  //  change, even though the interval members in the pg_interval_t
+  //  do not change.
+  if (is_new_interval(
+	old_acting_primary,
+	new_acting_primary,
+	old_acting,
+	new_acting,
+	old_up_primary,
+	new_up_primary,
+	old_up,
+	new_up,
+	osdmap,
+	lastmap,
+	pgid)) {
     pg_interval_t& i = (*past_intervals)[same_interval_since];
     i.first = same_interval_since;
     i.last = osdmap->get_epoch() - 1;
     i.acting = old_acting;
     i.up = old_up;
+    i.primary = old_acting_primary;
+    i.up_primary = old_up_primary;
 
-    if (!i.acting.empty() &&
+    if (!i.acting.empty() && i.primary != -1 &&
 	i.acting.size() >=
-	lastmap->get_pools().find(pool_id)->second.min_size) {
+	lastmap->get_pools().find(pgid.pool())->second.min_size) {
       if (out)
 	*out << "generate_past_intervals " << i
 	     << ": not rw,"
-	     << " up_thru " << lastmap->get_up_thru(i.acting[0])
-	     << " up_from " << lastmap->get_up_from(i.acting[0])
+	     << " up_thru " << lastmap->get_up_thru(i.primary)
+	     << " up_from " << lastmap->get_up_from(i.primary)
 	     << " last_epoch_clean " << last_epoch_clean
 	     << std::endl;
-      if (lastmap->get_up_thru(i.acting[0]) >= i.first &&
-	  lastmap->get_up_from(i.acting[0]) <= i.first) {
+      if (lastmap->get_up_thru(i.primary) >= i.first &&
+	  lastmap->get_up_from(i.primary) <= i.first) {
 	i.maybe_went_rw = true;
 	if (out)
 	  *out << "generate_past_intervals " << i
-	       << " : primary up " << lastmap->get_up_from(i.acting[0])
-	       << "-" << lastmap->get_up_thru(i.acting[0])
+	       << " : primary up " << lastmap->get_up_from(i.primary)
+	       << "-" << lastmap->get_up_thru(i.primary)
 	       << " includes interval"
 	       << std::endl;
       } else if (last_epoch_clean >= i.first &&
@@ -1972,8 +2407,8 @@ bool pg_interval_t::check_new_interval(
 	i.maybe_went_rw = false;
 	if (out)
 	  *out << "generate_past_intervals " << i
-	       << " : primary up " << lastmap->get_up_from(i.acting[0])
-	       << "-" << lastmap->get_up_thru(i.acting[0])
+	       << " : primary up " << lastmap->get_up_from(i.primary)
+	       << "-" << lastmap->get_up_thru(i.primary)
 	       << " does not include interval"
 	       << std::endl;
       }
@@ -1990,7 +2425,9 @@ bool pg_interval_t::check_new_interval(
 
 ostream& operator<<(ostream& out, const pg_interval_t& i)
 {
-  out << "interval(" << i.first << "-" << i.last << " " << i.up << "/" << i.acting;
+  out << "interval(" << i.first << "-" << i.last
+      << " up " << i.up << "(" << i.up_primary << ")"
+      << " acting " << i.acting << "(" << i.primary << ")";
   if (i.maybe_went_rw)
     out << " maybe_went_rw";
   out << ")";
@@ -2003,11 +2440,13 @@ ostream& operator<<(ostream& out, const pg_interval_t& i)
 
 void pg_query_t::encode(bufferlist &bl, uint64_t features) const {
   if (features & CEPH_FEATURE_QUERY_T) {
-    ENCODE_START(2, 2, bl);
+    ENCODE_START(3, 2, bl);
     ::encode(type, bl);
     ::encode(since, bl);
     history.encode(bl);
     ::encode(epoch_sent, bl);
+    ::encode(to, bl);
+    ::encode(from, bl);
     ENCODE_FINISH(bl);
   } else {
     ::encode(type, bl);
@@ -2019,11 +2458,18 @@ void pg_query_t::encode(bufferlist &bl, uint64_t features) const {
 void pg_query_t::decode(bufferlist::iterator &bl) {
   bufferlist::iterator bl2 = bl;
   try {
-    DECODE_START(2, bl);
+    DECODE_START(3, bl);
     ::decode(type, bl);
     ::decode(since, bl);
     history.decode(bl);
     ::decode(epoch_sent, bl);
+    if (struct_v >= 3) {
+      ::decode(to, bl);
+      ::decode(from, bl);
+    } else {
+      to = shard_id_t::NO_SHARD;
+      from = shard_id_t::NO_SHARD;
+    }
     DECODE_FINISH(bl);
   } catch (...) {
     bl = bl2;
@@ -2035,6 +2481,8 @@ void pg_query_t::decode(bufferlist::iterator &bl) {
 
 void pg_query_t::dump(Formatter *f) const
 {
+  f->dump_int("from", from);
+  f->dump_int("to", to);
   f->dump_string("type", get_type_name());
   f->dump_stream("since") << since;
   f->dump_stream("epoch_sent") << epoch_sent;
@@ -2047,12 +2495,154 @@ void pg_query_t::generate_test_instances(list<pg_query_t*>& o)
   o.push_back(new pg_query_t());
   list<pg_history_t*> h;
   pg_history_t::generate_test_instances(h);
-  o.push_back(new pg_query_t(pg_query_t::INFO, *h.back(), 4));
-  o.push_back(new pg_query_t(pg_query_t::MISSING, *h.back(), 4));
-  o.push_back(new pg_query_t(pg_query_t::LOG, eversion_t(4, 5), *h.back(), 4));
-  o.push_back(new pg_query_t(pg_query_t::FULLLOG, *h.back(), 5));
+  o.push_back(new pg_query_t(pg_query_t::INFO, shard_id_t(1), shard_id_t(2), *h.back(), 4));
+  o.push_back(new pg_query_t(pg_query_t::MISSING, shard_id_t(2), shard_id_t(3), *h.back(), 4));
+  o.push_back(new pg_query_t(pg_query_t::LOG, shard_id_t(0), shard_id_t(0),
+			     eversion_t(4, 5), *h.back(), 4));
+  o.push_back(new pg_query_t(pg_query_t::FULLLOG,
+			     shard_id_t::NO_SHARD, shard_id_t::NO_SHARD,
+			     *h.back(), 5));
 }
 
+// -- ObjectModDesc --
+void ObjectModDesc::visit(Visitor *visitor) const
+{
+  bufferlist::iterator bp = bl.begin();
+  try {
+    while (!bp.end()) {
+      DECODE_START(1, bp);
+      uint8_t code;
+      ::decode(code, bp);
+      switch (code) {
+      case APPEND: {
+	uint64_t size;
+	::decode(size, bp);
+	visitor->append(size);
+	break;
+      }
+      case SETATTRS: {
+	map<string, boost::optional<bufferlist> > attrs;
+	::decode(attrs, bp);
+	visitor->setattrs(attrs);
+	break;
+      }
+      case DELETE: {
+	version_t old_version;
+	::decode(old_version, bp);
+	visitor->rmobject(old_version);
+	break;
+      }
+      case CREATE: {
+	visitor->create();
+	break;
+      }
+      case UPDATE_SNAPS: {
+	set<snapid_t> snaps;
+	::decode(snaps, bp);
+	visitor->update_snaps(snaps);
+	break;
+      }
+      default:
+	assert(0 == "Invalid rollback code");
+      }
+      DECODE_FINISH(bp);
+    }
+  } catch (...) {
+    assert(0 == "Invalid encoding");
+  }
+}
+
+struct DumpVisitor : public ObjectModDesc::Visitor {
+  Formatter *f;
+  DumpVisitor(Formatter *f) : f(f) {}
+  void append(uint64_t old_size) {
+    f->open_object_section("op");
+    f->dump_string("code", "APPEND");
+    f->dump_unsigned("old_size", old_size);
+    f->close_section();
+  }
+  void setattrs(map<string, boost::optional<bufferlist> > &attrs) {
+    f->open_object_section("op");
+    f->dump_string("code", "SETATTRS");
+    f->open_array_section("attrs");
+    for (map<string, boost::optional<bufferlist> >::iterator i = attrs.begin();
+	 i != attrs.end();
+	 ++i) {
+      f->dump_string("attr_name", i->first);
+    }
+    f->close_section();
+    f->close_section();
+  }
+  void rmobject(version_t old_version) {
+    f->open_object_section("op");
+    f->dump_string("code", "RMOBJECT");
+    f->dump_unsigned("old_version", old_version);
+    f->close_section();
+  }
+  void create() {
+    f->open_object_section("op");
+    f->dump_string("code", "CREATE");
+    f->close_section();
+  }
+  void update_snaps(set<snapid_t> &snaps) {
+    f->open_object_section("op");
+    f->dump_string("code", "UPDATE_SNAPS");
+    f->dump_stream("snaps") << snaps;
+    f->close_section();
+  }
+};
+
+void ObjectModDesc::dump(Formatter *f) const
+{
+  f->open_object_section("object_mod_desc");
+  f->dump_bool("can_local_rollback", can_local_rollback);
+  f->dump_bool("rollback_info_completed", rollback_info_completed);
+  {
+    f->open_array_section("ops");
+    DumpVisitor vis(f);
+    visit(&vis);
+    f->close_section();
+  }
+  f->close_section();
+}
+
+void ObjectModDesc::generate_test_instances(list<ObjectModDesc*>& o)
+{
+  map<string, boost::optional<bufferlist> > attrs;
+  attrs[OI_ATTR];
+  attrs[SS_ATTR];
+  attrs["asdf"];
+  o.push_back(new ObjectModDesc());
+  o.back()->append(100);
+  o.back()->setattrs(attrs);
+  o.push_back(new ObjectModDesc());
+  o.back()->rmobject(1001);
+  o.push_back(new ObjectModDesc());
+  o.back()->create();
+  o.back()->setattrs(attrs);
+  o.push_back(new ObjectModDesc());
+  o.back()->create();
+  o.back()->setattrs(attrs);
+  o.back()->mark_unrollbackable();
+  o.back()->append(1000);
+}
+
+void ObjectModDesc::encode(bufferlist &_bl) const
+{
+  ENCODE_START(1, 1, _bl);
+  ::encode(can_local_rollback, _bl);
+  ::encode(rollback_info_completed, _bl);
+  ::encode(bl, _bl);
+  ENCODE_FINISH(_bl);
+}
+void ObjectModDesc::decode(bufferlist::iterator &_bl)
+{
+  DECODE_START(1, _bl);
+  ::decode(can_local_rollback, _bl);
+  ::decode(rollback_info_completed, _bl);
+  ::decode(bl, _bl);
+  DECODE_FINISH(_bl);
+}
 
 // -- pg_log_entry_t --
 
@@ -2084,7 +2674,7 @@ void pg_log_entry_t::decode_with_checksum(bufferlist::iterator& p)
 
 void pg_log_entry_t::encode(bufferlist &bl) const
 {
-  ENCODE_START(8, 4, bl);
+  ENCODE_START(9, 4, bl);
   ::encode(op, bl);
   ::encode(soid, bl);
   ::encode(version, bl);
@@ -2107,6 +2697,7 @@ void pg_log_entry_t::encode(bufferlist &bl) const
     ::encode(prior_version, bl);
   ::encode(snaps, bl);
   ::encode(user_version, bl);
+  ::encode(mod_desc, bl);
   ENCODE_FINISH(bl);
 }
 
@@ -2154,6 +2745,11 @@ void pg_log_entry_t::decode(bufferlist::iterator &bl)
   else
     user_version = version.version;
 
+  if (struct_v >= 9)
+    ::decode(mod_desc, bl);
+  else
+    mod_desc.mark_unrollbackable();
+
   DECODE_FINISH(bl);
 }
 
@@ -2162,7 +2758,7 @@ void pg_log_entry_t::dump(Formatter *f) const
   f->dump_string("op", get_op_name());
   f->dump_stream("object") << soid;
   f->dump_stream("version") << version;
-  f->dump_stream("prior_version") << version;
+  f->dump_stream("prior_version") << prior_version;
   f->dump_stream("reqid") << reqid;
   f->dump_stream("mtime") << mtime;
   if (snaps.length() > 0) {
@@ -2177,6 +2773,11 @@ void pg_log_entry_t::dump(Formatter *f) const
     f->open_object_section("snaps");
     for (vector<snapid_t>::iterator p = v.begin(); p != v.end(); ++p)
       f->dump_unsigned("snap", *p);
+    f->close_section();
+  }
+  {
+    f->open_object_section("mod_desc");
+    mod_desc.dump(f);
     f->close_section();
   }
 }
@@ -2213,16 +2814,18 @@ ostream& operator<<(ostream& out, const pg_log_entry_t& e)
 
 void pg_log_t::encode(bufferlist& bl) const
 {
-  ENCODE_START(4, 3, bl);
+  ENCODE_START(6, 3, bl);
   ::encode(head, bl);
   ::encode(tail, bl);
   ::encode(log, bl);
+  ::encode(can_rollback_to, bl);
+  ::encode(rollback_info_trimmed_to, bl);
   ENCODE_FINISH(bl);
 }
  
 void pg_log_t::decode(bufferlist::iterator &bl, int64_t pool)
 {
-  DECODE_START_LEGACY_COMPAT_LEN(4, 3, 3, bl);
+  DECODE_START_LEGACY_COMPAT_LEN(6, 3, 3, bl);
   ::decode(head, bl);
   ::decode(tail, bl);
   if (struct_v < 2) {
@@ -2230,6 +2833,13 @@ void pg_log_t::decode(bufferlist::iterator &bl, int64_t pool)
     ::decode(backlog, bl);
   }
   ::decode(log, bl);
+  if (struct_v >= 5)
+    ::decode(can_rollback_to, bl);
+
+  if (struct_v >= 6)
+    ::decode(rollback_info_trimmed_to, bl);
+  else
+    rollback_info_trimmed_to = tail;
   DECODE_FINISH(bl);
 
   // handle hobject_t format change
@@ -2237,7 +2847,7 @@ void pg_log_t::decode(bufferlist::iterator &bl, int64_t pool)
     for (list<pg_log_entry_t>::iterator i = log.begin();
 	 i != log.end();
 	 ++i) {
-      if (i->soid.pool == -1)
+      if (!i->soid.is_max() && i->soid.pool == -1)
 	i->soid.pool = pool;
     }
   }
@@ -2272,6 +2882,7 @@ void pg_log_t::generate_test_instances(list<pg_log_t*>& o)
 
 void pg_log_t::copy_after(const pg_log_t &other, eversion_t v) 
 {
+  can_rollback_to = other.can_rollback_to;
   head = other.head;
   tail = other.tail;
   for (list<pg_log_entry_t>::const_reverse_iterator i = other.log.rbegin();
@@ -2289,6 +2900,7 @@ void pg_log_t::copy_after(const pg_log_t &other, eversion_t v)
 
 void pg_log_t::copy_range(const pg_log_t &other, eversion_t from, eversion_t to)
 {
+  can_rollback_to = other.can_rollback_to;
   list<pg_log_entry_t>::const_reverse_iterator i = other.log.rbegin();
   assert(i != other.log.rend());
   while (i->version > to) {
@@ -2308,6 +2920,7 @@ void pg_log_t::copy_range(const pg_log_t &other, eversion_t from, eversion_t to)
 
 void pg_log_t::copy_up_to(const pg_log_t &other, int max)
 {
+  can_rollback_to = other.can_rollback_to;
   int n = 0;
   head = other.head;
   tail = other.tail;
@@ -2354,7 +2967,7 @@ void pg_missing_t::decode(bufferlist::iterator &bl, int64_t pool)
     for (map<hobject_t, item>::iterator i = missing.begin();
 	 i != missing.end();
       ) {
-      if (i->first.pool == -1) {
+      if (!i->first.is_max() && i->first.pool == -1) {
 	hobject_t to_insert(i->first);
 	to_insert.pool = pool;
 	tmp[to_insert] = i->second;
@@ -2621,7 +3234,7 @@ void object_copy_data_t::decode_classic(bufferlist::iterator& bl)
 
 void object_copy_data_t::encode(bufferlist& bl) const
 {
-  ENCODE_START(1, 1, bl);
+  ENCODE_START(3, 1, bl);
   ::encode(size, bl);
   ::encode(mtime, bl);
   ::encode(category, bl);
@@ -2629,12 +3242,15 @@ void object_copy_data_t::encode(bufferlist& bl) const
   ::encode(data, bl);
   ::encode(omap, bl);
   ::encode(cursor, bl);
+  ::encode(omap_header, bl);
+  ::encode(snaps, bl);
+  ::encode(snap_seq, bl);
   ENCODE_FINISH(bl);
 }
 
 void object_copy_data_t::decode(bufferlist::iterator& bl)
 {
-  DECODE_START(1, bl);
+  DECODE_START(2, bl);
   ::decode(size, bl);
   ::decode(mtime, bl);
   ::decode(category, bl);
@@ -2642,6 +3258,15 @@ void object_copy_data_t::decode(bufferlist::iterator& bl)
   ::decode(data, bl);
   ::decode(omap, bl);
   ::decode(cursor, bl);
+  if (struct_v >= 2)
+    ::decode(omap_header, bl);
+  if (struct_v >= 3) {
+    ::decode(snaps, bl);
+    ::decode(snap_seq, bl);
+  } else {
+    snaps.clear();
+    snap_seq = 0;
+  }
   DECODE_FINISH(bl);
 }
 
@@ -2670,6 +3295,8 @@ void object_copy_data_t::generate_test_instances(list<object_copy_data_t*>& o)
   o.back()->omap["why"] = bl2;
   bufferptr databp("iamsomedatatocontain", 20);
   o.back()->data.push_back(databp);
+  o.back()->omap_header.append("this is an omap header");
+  o.back()->snaps.push_back(123);
 }
 
 void object_copy_data_t::dump(Formatter *f) const
@@ -2683,7 +3310,13 @@ void object_copy_data_t::dump(Formatter *f) const
      const-correctness prents that */
   f->dump_int("attrs_size", attrs.size());
   f->dump_int("omap_size", omap.size());
+  f->dump_int("omap_header_length", omap_header.length());
   f->dump_int("data_length", data.length());
+  f->open_array_section("snaps");
+  for (vector<snapid_t>::const_iterator p = snaps.begin();
+       p != snaps.end(); ++p)
+    f->dump_unsigned("snap", *p);
+  f->close_section();
 }
 
 // -- pg_create_t --
@@ -2990,6 +3623,64 @@ ostream& operator<<(ostream& out, const SnapSet& cs)
 	     << (cs.head_exists ? "+head":"");
 }
 
+void SnapSet::from_snap_set(const librados::snap_set_t& ss)
+{
+  // NOTE: our reconstruction of snaps (and the snapc) is not strictly
+  // correct: it will not include snaps that still logically exist
+  // but for which there was no clone that is defined.  For all
+  // practical purposes this doesn't matter, since we only use that
+  // information to clone on the OSD, and we have already moved
+  // forward past that part of the object history.
+
+  seq = ss.seq;
+  set<snapid_t> _snaps;
+  set<snapid_t> _clones;
+  head_exists = false;
+  for (vector<librados::clone_info_t>::const_iterator p = ss.clones.begin();
+       p != ss.clones.end();
+       ++p) {
+    if (p->cloneid == librados::SNAP_HEAD) {
+      head_exists = true;
+    } else {
+      _clones.insert(p->cloneid);
+      _snaps.insert(p->snaps.begin(), p->snaps.end());
+      clone_size[p->cloneid] = p->size;
+      clone_overlap[p->cloneid];  // the entry must exist, even if it's empty.
+      for (vector<pair<uint64_t, uint64_t> >::const_iterator q =
+	     p->overlap.begin(); q != p->overlap.end(); ++q)
+	clone_overlap[p->cloneid].insert(q->first, q->second);
+    }
+  }
+
+  // ascending
+  clones.clear();
+  clones.reserve(_clones.size());
+  for (set<snapid_t>::iterator p = _clones.begin(); p != _clones.end(); ++p)
+    clones.push_back(*p);
+
+  // descending
+  snaps.clear();
+  snaps.reserve(_snaps.size());
+  for (set<snapid_t>::reverse_iterator p = _snaps.rbegin();
+       p != _snaps.rend(); ++p)
+    snaps.push_back(*p);
+}
+
+uint64_t SnapSet::get_clone_bytes(snapid_t clone) const
+{
+  assert(clone_size.count(clone));
+  uint64_t size = clone_size.find(clone)->second;
+  assert(clone_overlap.count(clone));
+  const interval_set<uint64_t> &overlap = clone_overlap.find(clone)->second;
+  for (interval_set<uint64_t>::const_iterator i = overlap.begin();
+       i != overlap.end();
+       ++i) {
+    assert(size >= i.get_len());
+    size -= i.get_len();
+  }
+  return size;
+}
+
 // -- watch_info_t --
 
 void watch_info_t::encode(bufferlist& bl) const
@@ -3050,11 +3741,13 @@ void object_info_t::copy_user_bits(const object_info_t& other)
   // these bits are copied from head->clone.
   size = other.size;
   mtime = other.mtime;
+  local_mtime = other.local_mtime;
   last_reqid = other.last_reqid;
   truncate_seq = other.truncate_seq;
   truncate_size = other.truncate_size;
   flags = other.flags;
   category = other.category;
+  user_version = other.user_version;
 }
 
 ps_t object_info_t::legacy_object_locator_to_ps(const object_t &oid, 
@@ -3080,7 +3773,7 @@ void object_info_t::encode(bufferlist& bl) const
        ++i) {
     old_watchers.insert(make_pair(i->first.second, i->second));
   }
-  ENCODE_START(13, 8, bl);
+  ENCODE_START(14, 8, bl);
   ::encode(soid, bl);
   ::encode(myoloc, bl);	//Retained for compatibility
   ::encode(category, bl);
@@ -3105,6 +3798,7 @@ void object_info_t::encode(bufferlist& bl) const
   ::encode(watchers, bl);
   __u32 _flags = flags;
   ::encode(_flags, bl);
+  ::encode(local_mtime, bl);
   ENCODE_FINISH(bl);
 }
 
@@ -3183,6 +3877,11 @@ void object_info_t::decode(bufferlist::iterator& bl)
     ::decode(_flags, bl);
     flags = (flag_t)_flags;
   }
+  if (struct_v >= 14) {
+    ::decode(local_mtime, bl);
+  } else {
+    local_mtime = utime_t();
+  }
   DECODE_FINISH(bl);
 }
 
@@ -3195,8 +3894,10 @@ void object_info_t::dump(Formatter *f) const
   f->dump_stream("version") << version;
   f->dump_stream("prior_version") << prior_version;
   f->dump_stream("last_reqid") << last_reqid;
+  f->dump_unsigned("user_version", user_version);
   f->dump_unsigned("size", size);
   f->dump_stream("mtime") << mtime;
+  f->dump_stream("local_mtime") << local_mtime;
   f->dump_unsigned("lost", (int)is_lost());
   f->dump_unsigned("flags", (int)flags);
   f->dump_stream("wrlock_by") << wrlock_by;
@@ -3236,6 +3937,8 @@ ostream& operator<<(ostream& out, const object_info_t& oi)
     out << " " << oi.snaps;
   if (oi.flags)
     out << " " << oi.get_flag_string();
+  out << " s " << oi.size;
+  out << " uv" << oi.user_version;
   out << ")";
   return out;
 }
@@ -3331,7 +4034,7 @@ void ObjectRecoveryInfo::decode(bufferlist::iterator &bl,
   DECODE_FINISH(bl);
 
   if (struct_v < 2) {
-    if (soid.pool == -1)
+    if (!soid.is_max() && soid.pool == -1)
       soid.pool = pool;
     map<hobject_t, interval_set<uint64_t> > tmp;
     tmp.swap(clone_subset);
@@ -3339,7 +4042,7 @@ void ObjectRecoveryInfo::decode(bufferlist::iterator &bl,
 	 i != tmp.end();
 	 ++i) {
       hobject_t first(i->first);
-      if (first.pool == -1)
+      if (!first.is_max() && first.pool == -1)
 	first.pool = pool;
       clone_subset[first].swap(i->second);
     }
@@ -3659,7 +4362,7 @@ void ScrubMap::decode(bufferlist::iterator& bl, int64_t pool)
 	 i != tmp.end();
 	 ++i) {
       hobject_t first(i->first);
-      if (first.pool == -1)
+      if (!first.is_max() && first.pool == -1)
 	first.pool = pool;
       objects[first] = i->second;
     }
@@ -3791,6 +4494,9 @@ ostream& operator<<(ostream& out, const OSDOp& op)
     case CEPH_OSD_OP_LIST_SNAPS:
     case CEPH_OSD_OP_UNDIRTY:
     case CEPH_OSD_OP_ISDIRTY:
+    case CEPH_OSD_OP_CACHE_FLUSH:
+    case CEPH_OSD_OP_CACHE_TRY_FLUSH:
+    case CEPH_OSD_OP_CACHE_EVICT:
       break;
     case CEPH_OSD_OP_ASSERT_VER:
       out << " v" << op.op.assert_ver.ver;
@@ -3809,10 +4515,16 @@ ostream& operator<<(ostream& out, const OSDOp& op)
       out << (op.op.watch.flag ? " add":" remove")
 	  << " cookie " << op.op.watch.cookie << " ver " << op.op.watch.ver;
       break;
+    case CEPH_OSD_OP_COPY_GET:
     case CEPH_OSD_OP_COPY_GET_CLASSIC:
       out << " max " << op.op.copy_get.max;
+      break;
     case CEPH_OSD_OP_COPY_FROM:
       out << " ver " << op.op.copy_from.src_version;
+      break;
+    case CEPH_OSD_OP_SETALLOCHINT:
+      out << " object_size " << op.op.alloc_hint.expected_object_size
+          << " write_size " << op.op.alloc_hint.expected_write_size;
       break;
     default:
       out << " " << op.op.extent.offset << "~" << op.op.extent.length;

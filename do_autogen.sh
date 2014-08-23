@@ -17,6 +17,7 @@ do_autogen.sh: make a ceph build by running autogen, etc.
 -O <level>                       optimize
 -n                               use libnss
 -j                               with java
+-r                               with rocksdb
 
 EOF
 }
@@ -29,8 +30,8 @@ die() {
 debug_level=0
 verbose=0
 profile=0
-CONFIGURE_FLAGS=""
-while getopts  "d:e:hHTPjpnvO:" flag
+CONFIGURE_FLAGS="--disable-static"
+while getopts  "d:e:hHrTPjpnvO:" flag
 do
     case $flag in
     d) debug_level=$OPTARG;;
@@ -48,6 +49,8 @@ do
     T) CONFIGURE_FLAGS="$CONFIGURE_FLAGS --without-tcmalloc";;
 
     j) CONFIGURE_FLAGS="$CONFIGURE_FLAGS --enable-cephfs-java";;
+
+    r) CONFIGURE_FLAGS="$CONFIGURE_FLAGS --with-librocksdb-static";;
 
     v) verbose=1;;
 
@@ -79,7 +82,7 @@ if [ "${debug_level}" -ge 3 ]; then
 -Wno-missing-field-initializers -Wno-missing-declarations"
 fi
 if [ "${debug_level}" -ge 4 ]; then
-    if [ "${CXX}" -ne "clang++" ]; then
+    if [ "${CXX}" != "clang++" ]; then
         CXXFLAGS="${CXXFLAGS} -Wstrict-null-sentinel -Woverloaded-virtual"
     else
         CXXFLAGS="${CXXFLAGS} -Woverloaded-virtual"

@@ -18,7 +18,7 @@ of the following terms:
    responsible for a particular placement group.
 
 *Up Set*
-   The ordered list of OSDs responsible for a particular placment
+   The ordered list of OSDs responsible for a particular placement
    group for a particular epoch according to CRUSH. Normally this
    is the same as the *Acting Set*, except when the *Acting Set* has 
    been explicitly overridden via ``pg_temp`` in the OSD Map.
@@ -84,7 +84,7 @@ of the following terms:
 *up_thru*
    Before a *Primary* can successfully complete the *Peering* process,
    it must inform a monitor that is alive through the current
-   osd map *Epoch* by having the monitor set its *up_thru* in the osd
+   OSD map *Epoch* by having the monitor set its *up_thru* in the osd
    map.  This helps *Peering* ignore previous *Acting Sets* for which
    *Peering* never completed after certain sequences of failures, such as
    the second interval below:

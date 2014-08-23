@@ -1,3 +1,5 @@
+// -*- mode:C; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
 /**
  * All operations via the rados gateway are carried out by
  * small classes known as RGWOps. This class contains a req_state
@@ -38,6 +40,7 @@ protected:
   RGWCORSConfiguration bucket_cors;
   bool cors_exist;
   RGWQuotaInfo bucket_quota;
+  RGWQuotaInfo user_quota;
 
   virtual int init_quota();
 public:
@@ -64,9 +67,12 @@ public:
   virtual bool prefetch_data() { return false; }
   virtual int verify_permission() = 0;
   virtual int verify_op_mask();
+  virtual void pre_exec() {}
   virtual void execute() = 0;
   virtual void send_response() {}
-  virtual void complete() { send_response(); }
+  virtual void complete() {
+    send_response();
+  }
   virtual const string name() = 0;
 
   virtual uint32_t op_mask() { return 0; }
@@ -123,10 +129,9 @@ public:
     this->get_data = get_data;
   }
   int verify_permission();
+  void pre_exec();
   void execute();
   int read_user_manifest_part(rgw_bucket& bucket, RGWObjEnt& ent, RGWAccessControlPolicy *bucket_policy, off_t start_ofs, off_t end_ofs);
-  int iterate_user_manifest_parts(rgw_bucket& bucket, string& obj_prefix, RGWAccessControlPolicy *bucket_policy,
-                                  uint64_t *ptotal_len, bool read_data);
   int handle_user_manifest(const char *prefix);
 
   int get_data_cb(bufferlist& bl, off_t ofs, off_t len);
@@ -197,6 +202,7 @@ class RGWListBucket : public RGWOp {
 protected:
   string prefix;
   string marker; 
+  string next_marker; 
   string max_keys;
   string delimiter;
   int max;
@@ -217,6 +223,7 @@ public:
     is_truncated = false;
   }
   int verify_permission();
+  void pre_exec();
   void execute();
 
   virtual int get_params() = 0;
@@ -246,6 +253,7 @@ public:
   ~RGWStatBucket() {}
 
   int verify_permission();
+  void pre_exec();
   void execute();
 
   virtual void send_response() = 0;
@@ -261,13 +269,16 @@ protected:
   string placement_rule;
   RGWBucketInfo info;
   obj_version ep_objv;
+  bool has_cors;
+  RGWCORSConfiguration cors_config;
 
   bufferlist in_data;
 
 public:
-  RGWCreateBucket() : ret(0) {}
+  RGWCreateBucket() : ret(0), has_cors(false) {}
 
   int verify_permission();
+  void pre_exec();
   void execute();
   virtual void init(RGWRados *store, struct req_state *s, RGWHandler *h) {
     RGWOp::init(store, s, h);
@@ -289,6 +300,7 @@ public:
   RGWDeleteBucket() : ret(0) {}
 
   int verify_permission();
+  void pre_exec();
   void execute();
 
   virtual void send_response() = 0;
@@ -311,6 +323,8 @@ protected:
   const char *obj_manifest;
   time_t mtime;
 
+  MD5 *user_manifest_parts_hash;
+
 public:
   RGWPutObj() {
     ret = 0;
@@ -320,6 +334,7 @@ public:
     chunked_upload = false;
     obj_manifest = NULL;
     mtime = 0;
+    user_manifest_parts_hash = NULL;
   }
 
   virtual void init(RGWRados *store, struct req_state *s, RGWHandler *h) {
@@ -327,10 +342,13 @@ public:
     policy.set_ctx(s->cct);
   }
 
-  RGWPutObjProcessor *select_processor();
+  RGWPutObjProcessor *select_processor(bool *is_multipart);
   void dispose_processor(RGWPutObjProcessor *processor);
 
+  int user_manifest_iterate_cb(rgw_bucket& bucket, RGWObjEnt& ent, RGWAccessControlPolicy *bucket_policy, off_t start_ofs, off_t end_ofs);
+
   int verify_permission();
+  void pre_exec();
   void execute();
 
   virtual int get_params() = 0;
@@ -370,6 +388,7 @@ public:
   }
 
   int verify_permission();
+  void pre_exec();
   void execute();
 
   RGWPutObjProcessor *select_processor();
@@ -402,12 +421,28 @@ public:
     policy.set_ctx(s->cct);
   }
   int verify_permission();
+  void pre_exec();
   void execute();
 
   virtual int get_params() = 0;
   virtual void send_response() = 0;
   virtual const string name() { return "put_obj_metadata"; }
   virtual uint32_t op_mask() { return RGW_OP_TYPE_WRITE; }
+};
+
+class RGWSetTempUrl : public RGWOp {
+protected:
+  int ret;
+  map<int, string> temp_url_keys;
+public:
+  RGWSetTempUrl() : ret(0) {}
+
+  int verify_permission();
+  void execute();
+
+  virtual int get_params() = 0;
+  virtual void send_response() = 0;
+  virtual const string name() { return "set_temp_url"; }
 };
 
 class RGWDeleteObj : public RGWOp {
@@ -418,6 +453,7 @@ public:
   RGWDeleteObj() : ret(0) {}
 
   int verify_permission();
+  void pre_exec();
   void execute();
 
   virtual void send_response() = 0;
@@ -486,6 +522,7 @@ public:
     dest_policy.set_ctx(s->cct);
   }
   int verify_permission();
+  void pre_exec();
   void execute();
   void progress_cb(off_t ofs);
 
@@ -506,6 +543,7 @@ public:
   RGWGetACLs() : ret(0) {}
 
   int verify_permission();
+  void pre_exec();
   void execute();
 
   virtual void send_response() = 0;
@@ -530,6 +568,7 @@ public:
   }
 
   int verify_permission();
+  void pre_exec();
   void execute();
 
   virtual int get_policy_from_state(RGWRados *store, struct req_state *s, stringstream& ss) { return 0; }
@@ -625,6 +664,7 @@ public:
     policy.set_ctx(s->cct);
   }
   int verify_permission();
+  void pre_exec();
   void execute();
 
   virtual int get_params() = 0;
@@ -640,20 +680,19 @@ protected:
   string etag;
   char *data;
   int len;
-  uint64_t min_part_size;
 
 public:
   RGWCompleteMultipart() {
     ret = 0;
     data = NULL;
     len = 0;
-    min_part_size = RGW_MIN_MULTIPART_SIZE;
   }
   virtual ~RGWCompleteMultipart() {
     free(data);
   }
 
   int verify_permission();
+  void pre_exec();
   void execute();
 
   virtual int get_params() = 0;
@@ -670,6 +709,7 @@ public:
   RGWAbortMultipart() : ret(0) {}
 
   int verify_permission();
+  void pre_exec();
   void execute();
 
   virtual void send_response() = 0;
@@ -685,12 +725,14 @@ protected:
   int max_parts;
   int marker;
   RGWAccessControlPolicy policy;
+  bool truncated;
 
 public:
   RGWListMultipart() {
     ret = 0;
     max_parts = 1000;
     marker = 0;
+    truncated = false;
   }
 
   virtual void init(RGWRados *store, struct req_state *s, RGWHandler *h) {
@@ -698,6 +740,7 @@ public:
     policy = RGWAccessControlPolicy(s->cct);
   }
   int verify_permission();
+  void pre_exec();
   void execute();
 
   virtual int get_params() = 0;
@@ -715,21 +758,22 @@ class RGWMPObj {
   string upload_id;
 public:
   RGWMPObj() {}
-  RGWMPObj(string& _oid, string& _upload_id) {
-    init(_oid, _upload_id);
+  RGWMPObj(const string& _oid, const string& _upload_id) {
+    init(_oid, _upload_id, _upload_id);
   }
-  void init(string& _oid, string& _upload_id) {
+  void init(const string& _oid, const string& _upload_id) {
+    init(_oid, _upload_id, _upload_id);
+  }
+  void init(const string& _oid, const string& _upload_id, const string& part_unique_str) {
     if (_oid.empty()) {
       clear();
       return;
     }
     oid = _oid;
     upload_id = _upload_id;
-    prefix = oid;
-    prefix.append(".");
-    prefix.append(upload_id);
-    meta = prefix;
-    meta.append(MP_META_SUFFIX);
+    prefix = oid + ".";
+    meta = prefix + upload_id + MP_META_SUFFIX;
+    prefix.append(part_unique_str);
   }
   string& get_meta() { return meta; }
   string get_part(int num) {
@@ -760,7 +804,7 @@ public:
       return false;
     oid = meta.substr(0, mid_pos);
     upload_id = meta.substr(mid_pos + 1, end_pos - mid_pos - 1);
-    init(oid, upload_id);
+    init(oid, upload_id, upload_id);
     return true;
   }
   void clear() {
@@ -791,8 +835,10 @@ protected:
 
 public:
   RGWListBucketMultiparts() {
+    max_uploads = 0;
     ret = 0;
     is_truncated = false;
+    default_max = 0;
   }
 
   virtual void init(RGWRados *store, struct req_state *s, RGWHandler *h) {
@@ -801,6 +847,7 @@ public:
   }
 
   int verify_permission();
+  void pre_exec();
   void execute();
 
   virtual int get_params() = 0;
@@ -831,6 +878,7 @@ public:
     status_dumped = false;
   }
   int verify_permission();
+  void pre_exec();
   void execute();
 
   virtual int get_params() = 0;

@@ -7,7 +7,7 @@
 #include <set>
 #include <map>
 #include <string>
-#include <tr1/memory>
+#include "include/memory.h"
 #include <vector>
 
 #include "ObjectMap.h"
@@ -156,9 +156,8 @@ string DBObjectMap::ghobject_key(const ghobject_t &oid)
     t += snprintf(t, end - t, ".%llx", (long long unsigned)oid.hobj.pool);
   snprintf(t, end - t, ".%.*X", (int)(sizeof(oid.hobj.hash)*2), oid.hobj.hash);
 
-  if (oid.generation != ghobject_t::NO_GEN) {
-    assert(oid.shard_id != ghobject_t::NO_SHARD);
-
+  if (oid.generation != ghobject_t::NO_GEN ||
+      oid.shard_id != shard_id_t::NO_SHARD) {
     t += snprintf(t, end - t, ".%llx", (long long unsigned)oid.generation);
     t += snprintf(t, end - t, ".%x", (int)oid.shard_id);
   }
@@ -248,9 +247,9 @@ bool DBObjectMap::parse_ghobject_key_v0(const string &in, coll_t *c,
 
   *c = coll_t(coll);
   int64_t pool = -1;
-  pg_t pg;
+  spg_t pg;
   if (c->is_pg_prefix(pg))
-    pool = (int64_t)pg.pool();
+    pool = (int64_t)pg.pgid.pool();
   (*oid) = ghobject_t(hobject_t(name, key, snap, hash, pool, ""));
   return true;
 }
@@ -769,6 +768,42 @@ int DBObjectMap::rm_keys(const ghobject_t &oid,
   return db->submit_transaction(t);
 }
 
+int DBObjectMap::clear_keys_header(const ghobject_t &oid,
+				   const SequencerPosition *spos)
+{
+  KeyValueDB::Transaction t = db->get_transaction();
+  Header header = lookup_map_header(oid);
+  if (!header)
+    return -ENOENT;
+  if (check_spos(oid, header, spos))
+    return 0;
+
+  // save old attrs
+  KeyValueDB::Iterator iter = db->get_iterator(xattr_prefix(header));
+  if (!iter)
+    return -EINVAL;
+  map<string, bufferlist> attrs;
+  for (iter->seek_to_first(); !iter->status() && iter->valid(); iter->next())
+    attrs.insert(make_pair(iter->key(), iter->value()));
+  if (iter->status())
+    return iter->status();
+
+  // remove current header
+  remove_map_header(oid, header, t);
+  assert(header->num_children > 0);
+  header->num_children--;
+  int r = _clear(header, t);
+  if (r < 0)
+    return r;
+
+  // create new header
+  Header newheader = generate_new_header(oid, Header());
+  set_map_header(oid, *newheader, t);
+  if (!attrs.empty())
+    t->set(xattr_prefix(newheader), attrs);
+  return db->submit_transaction(t);
+}
+
 int DBObjectMap::get(const ghobject_t &oid,
 		     bufferlist *_header,
 		     map<string, bufferlist> *out)
@@ -1079,18 +1114,31 @@ DBObjectMap::Header DBObjectMap::_lookup_map_header(const ghobject_t &oid)
   while (map_header_in_use.count(oid))
     header_cond.Wait(header_lock);
 
+  _Header *header = new _Header();
+  {
+    Mutex::Locker l(cache_lock);
+    if (caches.lookup(oid, header)) {
+      return Header(header, RemoveMapHeaderOnDelete(this, oid));
+    }
+  }
+
   map<string, bufferlist> out;
   set<string> to_get;
   to_get.insert(map_header_key(oid));
   int r = db->get(HOBJECT_TO_SEQ, to_get, &out);
-  if (r < 0)
+  if (r < 0 || out.empty()) {
+    delete header;
     return Header();
-  if (out.empty())
-    return Header();
-  
-  Header ret(new _Header(), RemoveMapHeaderOnDelete(this, oid));
+  }
+
+  Header ret(header, RemoveMapHeaderOnDelete(this, oid));
   bufferlist::iterator iter = out.begin()->second.begin();
   ret->decode(iter);
+  {
+    Mutex::Locker l(cache_lock);
+    caches.add(oid, *ret);
+  }
+
   return ret;
 }
 
@@ -1185,6 +1233,10 @@ void DBObjectMap::remove_map_header(const ghobject_t &oid,
   set<string> to_remove;
   to_remove.insert(map_header_key(oid));
   t->rmkeys(HOBJECT_TO_SEQ, to_remove);
+  {
+    Mutex::Locker l(cache_lock);
+    caches.clear(oid);
+  }
 }
 
 void DBObjectMap::set_map_header(const ghobject_t &oid, _Header header,
@@ -1196,6 +1248,10 @@ void DBObjectMap::set_map_header(const ghobject_t &oid, _Header header,
   map<string, bufferlist> to_set;
   header.encode(to_set[map_header_key(oid)]);
   t->set(HOBJECT_TO_SEQ, to_set);
+  {
+    Mutex::Locker l(cache_lock);
+    caches.add(oid, header);
+  }
 }
 
 bool DBObjectMap::check_spos(const ghobject_t &oid,

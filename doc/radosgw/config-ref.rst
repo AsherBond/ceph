@@ -118,7 +118,7 @@ Ceph configuration file, the default value will be set automatically.
 ``rgw op thread suicide timeout``
 	
 :Description: The time ``timeout`` in seconds before a Ceph Object Gateway 
-              process dies. Disbled if set to ``0``.
+              process dies. Disabled if set to ``0``.
 
 :Type: Integer 
 :Default: ``0``
@@ -633,7 +633,7 @@ for your master zone and your secondary zones in each region. When creating
 pools for a specific zone, consider prepending the region name and zone name to
 the default pool names. For example:
 
-- ``.region1-zone1.rgw``
+- ``.region1-zone1.domain.rgw``
 - ``.region1-zone1.rgw.control``
 - ``.region1-zone1.rgw.gc``
 - ``.region1-zone1.log``
@@ -647,7 +647,7 @@ the default pool names. For example:
 
 Ceph Object Gateways store data for the bucket index (``index_pool``) and bucket
 data (``data_pool``) in placement pools. These may overlap--i.e., you may use
-the same pool for the the index and the data. The index pool for default
+the same pool for the index and the data. The index pool for default
 placement is ``.rgw.buckets.index`` and for the data pool for default placement
 is ``.rgw.buckets``. See `Zones`_ for details on specifying pools in a zone
 configuration.

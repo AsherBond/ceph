@@ -15,9 +15,7 @@ bool ceph_lock_state_t::is_waiting(ceph_filelock &fl)
     if (p->second.start > fl.start)
       return false;
     if (p->second.length == fl.length &&
-        p->second.client == fl.client &&
-        p->second.pid == fl.pid &&
-        p->second.pid_namespace == fl.pid_namespace)
+	ceph_filelock_owner_equal(p->second, fl))
       return true;
     ++p;
   }
@@ -31,9 +29,7 @@ void ceph_lock_state_t::remove_waiting(ceph_filelock& fl)
     if (p->second.start > fl.start)
       return;
     if (p->second.length == fl.length &&
-        p->second.client == fl.client &&
-        p->second.pid == fl.pid &&
-        p->second.pid_namespace == fl.pid_namespace) {
+	ceph_filelock_owner_equal(p->second, fl)) {
       waiting_locks.erase(p);
       --client_waiting_lock_counts[(client_t)fl.client];
       if (!client_waiting_lock_counts[(client_t)fl.client]) {
@@ -213,8 +209,7 @@ void ceph_lock_state_t::adjust_locks(list<multimap<uint64_t, ceph_filelock>::ite
 {
   dout(15) << "adjust_locks" << dendl;
   bool new_lock_to_end = (0 == new_lock.length);
-  uint64_t new_lock_start = new_lock.start;
-  uint64_t new_lock_end = new_lock.start + new_lock.length - 1;
+  uint64_t new_lock_start, new_lock_end;
   uint64_t old_lock_start, old_lock_end;
   __s64 old_lock_client = 0;
   ceph_filelock *old_lock;
@@ -466,17 +461,15 @@ void ceph_lock_state_t::split_by_owner(ceph_filelock& owner,
   dout(15) << "owner lock: " << owner << dendl;
   while (iter != locks.end()) {
     dout(15) << "comparing to " << (*iter)->second << dendl;
-    if ((*iter)->second.client == owner.client &&
-        (*iter)->second.pid_namespace == owner.pid_namespace &&
-        (*iter)->second.pid == owner.pid) {
+    if (ceph_filelock_owner_equal((*iter)->second, owner)) {
       dout(15) << "success, pushing to owned_locks" << dendl;
       owned_locks.push_back(*iter);
       iter = locks.erase(iter);
     } else {
       dout(15) << "failure, something not equal in this group "
               << (*iter)->second.client << ":" << owner.client << ","
-              << (*iter)->second.pid_namespace << ":" << owner.pid_namespace
-              << "," << (*iter)->second.pid << ":" << owner.pid << dendl;
+	      << (*iter)->second.owner << ":" << owner.owner << ","
+	      << (*iter)->second.pid << ":" << owner.pid << dendl;
       ++iter;
     }
   }

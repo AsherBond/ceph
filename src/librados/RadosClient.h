@@ -16,6 +16,7 @@
 
 #include "common/Cond.h"
 #include "common/Mutex.h"
+#include "common/RWLock.h"
 #include "common/Timer.h"
 #include "include/rados/librados.h"
 #include "include/rados/librados.hpp"
@@ -50,6 +51,8 @@ private:
   MonClient monclient;
   SimpleMessenger *messenger;
 
+  uint64_t instance_id;
+
   bool _dispatch(Message *m);
   bool ms_dispatch(Message *m);
 
@@ -60,7 +63,13 @@ private:
 
   Objecter *objecter;
 
+  map<string, int64_t> pool_cache;
+
+  epoch_t osdmap_epoch;
+  epoch_t pool_cache_epoch;
+
   Mutex lock;
+  RWLock pool_cache_rwl;
   Cond cond;
   SafeTimer timer;
   int refcnt;
@@ -70,7 +79,7 @@ private:
   void *log_cb_arg;
   string log_watch;
 
-  void wait_for_osdmap();
+  int wait_for_osdmap();
 
 public:
   Finisher finisher;
@@ -90,6 +99,8 @@ public:
   int get_fsid(std::string *s);
   int64_t lookup_pool(const char *name);
   const char *get_pool_name(int64_t pool_id);
+  bool pool_requires_alignment(int64_t pool_id);
+  uint64_t pool_required_alignment(int64_t pool_id);
   int pool_get_auid(uint64_t pool_id, unsigned long long *auid);
   int pool_get_name(uint64_t pool_id, std::string *auid);
 
@@ -130,6 +141,18 @@ public:
   void get();
   bool put();
   void blacklist_self(bool set);
+
+private:
+  bool ms_can_fast_dispatch_any() const { return true; }
+  bool ms_can_fast_dispatch(Message *m) const {
+    switch (m->get_type()) {
+    case CEPH_MSG_OSD_OPREPLY:
+      return true;
+    default:
+      return false;
+    }
+  }
+  void ms_fast_dispatch(Message *m) { ms_dispatch(m); }
 };
 
 #endif

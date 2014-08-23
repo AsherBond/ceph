@@ -17,13 +17,13 @@
 #include <stdint.h>
 #include <include/utime.h>
 #include "common/Mutex.h"
-#include "include/histogram.h"
+#include "common/histogram.h"
 #include "include/xlist.h"
 #include "msg/Message.h"
-#include <tr1/memory>
+#include "include/memory.h"
 
 class TrackedOp;
-typedef std::tr1::shared_ptr<TrackedOp> TrackedOpRef;
+typedef ceph::shared_ptr<TrackedOp> TrackedOpRef;
 
 class OpTracker;
 class OpHistory {
@@ -65,11 +65,14 @@ class OpTracker {
   OpHistory history;
   float complaint_time;
   int log_threshold;
+  void _mark_event(TrackedOp *op, const string &evt, utime_t now);
 
 public:
+  bool tracking_enabled;
   CephContext *cct;
-  OpTracker(CephContext *cct_) : seq(0), ops_in_flight_lock("OpTracker mutex"),
-      complaint_time(0), log_threshold(0), cct(cct_) {}
+  OpTracker(CephContext *cct_, bool tracking) : seq(0), ops_in_flight_lock("OpTracker mutex"),
+						complaint_time(0), log_threshold(0),
+						tracking_enabled(tracking), cct(cct_) {}
   void set_complaint_and_threshold(float time, int threshold) {
     complaint_time = time;
     log_threshold = threshold;
@@ -93,8 +96,8 @@ public:
    * @return True if there are any Ops to warn on, false otherwise.
    */
   bool check_ops_in_flight(std::vector<string> &warning_strings);
-  void mark_event(TrackedOp *op, const string &evt);
-  void _mark_event(TrackedOp *op, const string &evt, utime_t now);
+  void mark_event(TrackedOp *op, const string &evt,
+                          utime_t time = ceph_clock_now(g_ceph_context));
 
   void on_shutdown() {
     Mutex::Locker l(ops_in_flight_lock);
@@ -104,19 +107,11 @@ public:
     assert(ops_in_flight.empty());
   }
 
-  template <typename T>
-  typename T::Ref create_request(Message *ref)
+  template <typename T, typename U>
+  typename T::Ref create_request(U params)
   {
-    typename T::Ref retval(new T(ref, this),
+    typename T::Ref retval(new T(params, this),
 			   RemoveOnDelete(this));
-    
-    _mark_event(retval.get(), "header_read", ref->get_recv_stamp());
-    _mark_event(retval.get(), "throttled", ref->get_throttle_stamp());
-    _mark_event(retval.get(), "all_read", ref->get_recv_complete_stamp());
-    _mark_event(retval.get(), "dispatched", ref->get_dispatch_stamp());
-    
-    retval->init_from_message();
-    
     return retval;
   }
 };
@@ -127,9 +122,9 @@ private:
   friend class OpTracker;
   xlist<TrackedOp*>::item xitem;
 protected:
-  Message *request; /// the logical request we are tracking
   OpTracker *tracker; /// the tracker we are associated with
 
+  utime_t initiated_at;
   list<pair<utime_t, string> > events; /// list of events and their times
   Mutex lock; /// to protect the events list
   string current; /// the current state the event is in
@@ -137,36 +132,39 @@ protected:
 
   uint32_t warn_interval_multiplier; // limits output of a given op warning
 
-  TrackedOp(Message *req, OpTracker *_tracker) :
+  TrackedOp(OpTracker *_tracker, const utime_t& initiated) :
     xitem(this),
-    request(req),
     tracker(_tracker),
+    initiated_at(initiated),
     lock("TrackedOp::lock"),
     seq(0),
     warn_interval_multiplier(1)
   {
     tracker->register_inflight_op(&xitem);
+    events.push_back(make_pair(initiated_at, "initiated"));
   }
 
-  virtual void init_from_message() {}
   /// output any type-specific data you want to get when dump() is called
   virtual void _dump(utime_t now, Formatter *f) const {}
   /// if you want something else to happen when events are marked, implement
   virtual void _event_marked() {}
+  /// return a unique descriptor of the Op; eg the message it's attached to
+  virtual void _dump_op_descriptor_unlocked(ostream& stream) const = 0;
+  /// called when the last non-OpTracker reference is dropped
+  virtual void _unregistered() {};
 
 public:
-  virtual ~TrackedOp() { assert(request); request->put(); }
+  virtual ~TrackedOp() {}
 
-  utime_t get_arrived() const {
-    return request->get_recv_stamp();
+  const utime_t& get_initiated() const {
+    return initiated_at;
   }
   // This function maybe needs some work; assumes last event is completion time
   double get_duration() const {
     return events.size() ?
-      (events.rbegin()->first - get_arrived()) :
+      (events.rbegin()->first - get_initiated()) :
       0.0;
   }
-  Message *get_req() const { return request; }
 
   void mark_event(const string &event);
   virtual const char *state_string() const {

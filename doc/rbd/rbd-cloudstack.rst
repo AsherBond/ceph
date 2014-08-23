@@ -42,6 +42,15 @@ setup for CloudStack Primary Storage.
 .. note:: We recommend installing with Ubuntu 13.04 or later so that 
    you can use package installation instead of having to compile 
    libvirt from source.
+
+.. note:: Make sure the /tmp partition on your hypervisors is at least 25GB.
+   When deploying from a template from the first time /tmp will be used for
+   converting the template from QCOW2 to RAW for storage on RBD. This is no
+   longer valid starting from CloudStack version 4.4.0
+
+.. note:: To use RBD with CloudStack 4.4.0 you require at least librbd version
+   0.67.7 (Ceph Dumpling). Otherwise template deployments and template backups
+   will fail. In case you use Ubuntu we recommend at least LTS version 14.04
    
 Installing and configuring QEMU for use with CloudStack doesn't require any
 special handling. Ensure that you have a running Ceph Storage Cluster. Install
@@ -72,12 +81,23 @@ See `Create a Pool`_ for details on specifying the number of placement groups
 for your pools, and `Placement Groups`_ for details on the number of placement
 groups you should set for your pools.
 
+Create a CephX user
+===================
+
+To access the Ceph cluster we require a CephX user which has the correct credentials
+to access the ``cloudstack`` pool we just created.
+
+Although we could use ``client.admin`` for this, it's recommended to create a user
+with only access to the ``cloudstack`` pool.
+
+  ceph auth get-or-create client.cloudstack mon 'allow r' osd 'allow rwx pool=cloudstack'
+
+Use the information returned by the command in the next step when adding the Primary Storage.
 
 Add Primary Storage
 ===================
 
-To add primary storage, refer to `Add Primary Storage (4.0.0)`_ or 
-`Add Primary Storage (4.0.1)`_. To add a Ceph block device, the steps
+To add primary storage, refer to `Add Primary Storage (4.2.0)`_ to add a Ceph block device, the steps
 include: 
 
 #. Log in to the CloudStack UI.
@@ -89,16 +109,16 @@ include:
 #. Follow the CloudStack instructions.
 
    - For **Protocol**, select ``RBD``.
-   - Add cluster information (cephx is supported).
+   - Add cluster information (cephx is supported). Note: Do not include the ``client.`` part of the user.
    - Add ``rbd`` as a tag.
 
 
 Create a Disk Offering
 ======================
 
-To create a new disk offering, refer to `Create a New Disk Offering (4.0.0)`_ or
-`Create a New Disk Offering (4.0.1)`_. Create a disk offering so that it
-matches the ``rbd`` tag. The ``StoragePoolAllocator`` will choose the  ``rbd``
+To create a new disk offering, refer to `Create a New Disk Offering (4.2.0)`_.
+Create a disk offering so that it matches the ``rbd`` tag.
+The ``StoragePoolAllocator`` will choose the  ``rbd``
 pool when searching for a suitable storage pool. If the disk offering doesn't
 match the ``rbd`` tag, the ``StoragePoolAllocator`` may select the pool you
 created (e.g., ``cloudstack``).
@@ -108,8 +128,6 @@ Limitations
 ===========
 
 - CloudStack will only bind to one monitor (You can however create a Round Robin DNS record over multiple monitors)
-- CloudStack does not support cloning snapshots.
-- You still need a (small) NFS based Primary Storage for the SystemVMs
 - You may need to compile ``libvirt`` to use version 0.9.13 with Ubuntu.
 
 
@@ -118,8 +136,6 @@ Limitations
 .. _Placement Groups: ../../rados/operations/placement-groups
 .. _Install and Configure QEMU: ../qemu-rbd
 .. _Install and Configure libvirt: ../libvirt
-.. _KVM Hypervisor Host Installation: http://cloudstack.apache.org/docs/en-US/Apache_CloudStack/4.0.0-incubating/html/Installation_Guide/hypervisor-kvm-install-flow.html
-.. _Add Primary Storage (4.0.0): http://cloudstack.apache.org/docs/en-US/Apache_CloudStack/4.0.0-incubating/html/Admin_Guide/primary-storage-add.html
-.. _Add Primary Storage (4.0.1): http://cloudstack.apache.org/docs/en-US/Apache_CloudStack/4.0.1-incubating/html/Admin_Guide/primary-storage-add.html
-.. _Create a New Disk Offering (4.0.0): http://cloudstack.apache.org/docs/en-US/Apache_CloudStack/4.0.0-incubating/html/Admin_Guide/compute-disk-service-offerings.html#creating-disk-offerings
-.. _Create a New Disk Offering (4.0.1): http://cloudstack.apache.org/docs/en-US/Apache_CloudStack/4.0.1-incubating/html/Admin_Guide/compute-disk-service-offerings.html#creating-disk-offerings
+.. _KVM Hypervisor Host Installation: http://cloudstack.apache.org/docs/en-US/Apache_CloudStack/4.2.0/html/Installation_Guide/hypervisor-kvm-install-flow.html
+.. _Add Primary Storage (4.2.0): http://cloudstack.apache.org/docs/en-US/Apache_CloudStack/4.2.0/html/Admin_Guide/primary-storage-add.html
+.. _Create a New Disk Offering (4.2.0): http://cloudstack.apache.org/docs/en-US/Apache_CloudStack/4.2.0/html/Admin_Guide/compute-disk-service-offerings.html#creating-disk-offerings

@@ -18,8 +18,7 @@
 #include <set>
 using std::set;
 
-#include <ext/hash_map>
-using __gnu_cxx::hash_map;
+#include "include/unordered_map.h"
 
 #include "include/Context.h"
 #include "include/xlist.h"
@@ -28,7 +27,7 @@ using __gnu_cxx::hash_map;
 #include "mdstypes.h"
 
 class CInode;
-struct MDRequest;
+struct MDRequestImpl;
 
 #include "CInode.h"
 #include "Capability.h"
@@ -89,7 +88,8 @@ public:
 
   list<Message*> preopen_out_queue;  ///< messages for client, queued before they connect
 
-  elist<MDRequest*> requests;
+  elist<MDRequestImpl*> requests;
+  size_t get_request_count();
 
   interval_set<inodeno_t> pending_prealloc_inos; // journaling prealloc, will be added to prealloc_inos
 
@@ -182,17 +182,17 @@ private:
 
 
 public:
-  void add_completed_request(tid_t t, inodeno_t created) {
+  void add_completed_request(ceph_tid_t t, inodeno_t created) {
     info.completed_requests[t] = created;
   }
-  void trim_completed_requests(tid_t mintid) {
+  void trim_completed_requests(ceph_tid_t mintid) {
     // trim
     while (!info.completed_requests.empty() && 
 	   (mintid == 0 || info.completed_requests.begin()->first < mintid))
       info.completed_requests.erase(info.completed_requests.begin());
   }
-  bool have_completed_request(tid_t tid, inodeno_t *pcreated) const {
-    map<tid_t,inodeno_t>::const_iterator p = info.completed_requests.find(tid);
+  bool have_completed_request(ceph_tid_t tid, inodeno_t *pcreated) const {
+    map<ceph_tid_t,inodeno_t>::const_iterator p = info.completed_requests.find(tid);
     if (p == info.completed_requests.end())
       return false;
     if (pcreated)
@@ -235,7 +235,7 @@ class MDS;
 class SessionMap {
 private:
   MDS *mds;
-  hash_map<entity_name_t, Session*> session_map;
+  ceph::unordered_map<entity_name_t, Session*> session_map;
 public:
   map<int,xlist<Session*>* > by_state;
   
@@ -254,6 +254,10 @@ public:
     
   // sessions
   bool empty() { return session_map.empty(); }
+  const ceph::unordered_map<entity_name_t, Session*> &get_sessions() const
+  {
+    return session_map;
+  }
 
   bool is_any_state(int state) {
     map<int,xlist<Session*>* >::iterator p = by_state.find(state);
@@ -332,14 +336,14 @@ public:
   void dump();
 
   void get_client_set(set<client_t>& s) {
-    for (hash_map<entity_name_t,Session*>::iterator p = session_map.begin();
+    for (ceph::unordered_map<entity_name_t,Session*>::iterator p = session_map.begin();
 	 p != session_map.end();
 	 ++p)
       if (p->second->info.inst.name.is_client())
 	s.insert(p->second->info.inst.name.num());
   }
   void get_client_session_set(set<Session*>& s) {
-    for (hash_map<entity_name_t,Session*>::iterator p = session_map.begin();
+    for (ceph::unordered_map<entity_name_t,Session*>::iterator p = session_map.begin();
 	 p != session_map.end();
 	 ++p)
       if (p->second->info.inst.name.is_client())
@@ -371,7 +375,7 @@ public:
     Session *session = get_session(rid.name);
     return session && session->have_completed_request(rid.tid, NULL);
   }
-  void trim_completed_requests(entity_name_t c, tid_t tid) {
+  void trim_completed_requests(entity_name_t c, ceph_tid_t tid) {
     Session *session = get_session(c);
     assert(session);
     session->trim_completed_requests(tid);

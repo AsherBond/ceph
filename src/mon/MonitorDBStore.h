@@ -21,7 +21,6 @@
 #include <boost/scoped_ptr.hpp>
 #include <sstream>
 #include "os/KeyValueDB.h"
-#include "os/LevelDBStore.h"
 
 #include "include/assert.h"
 #include "common/Formatter.h"
@@ -29,7 +28,7 @@
 
 class MonitorDBStore
 {
-  boost::scoped_ptr<LevelDBStore> db;
+  boost::scoped_ptr<KeyValueDB> db;
   bool do_dump;
   int dump_fd;
 
@@ -87,6 +86,9 @@ class MonitorDBStore
 
   struct Transaction {
     list<Op> ops;
+    uint64_t bytes, keys;
+
+    Transaction() : bytes(0), keys(0) {}
 
     enum {
       OP_PUT	= 1,
@@ -96,6 +98,8 @@ class MonitorDBStore
 
     void put(string prefix, string key, bufferlist& bl) {
       ops.push_back(Op(OP_PUT, prefix, key, bl));
+      ++keys;
+      bytes += prefix.length() + key.length() + bl.length();
     }
 
     void put(string prefix, version_t ver, bufferlist& bl) {
@@ -112,6 +116,8 @@ class MonitorDBStore
 
     void erase(string prefix, string key) {
       ops.push_back(Op(OP_ERASE, prefix, key));
+      ++keys;
+      bytes += prefix.length() + key.length();
     }
 
     void erase(string prefix, version_t ver) {
@@ -129,14 +135,20 @@ class MonitorDBStore
     }
 
     void encode(bufferlist& bl) const {
-      ENCODE_START(1, 1, bl);
+      ENCODE_START(2, 1, bl);
       ::encode(ops, bl);
+      ::encode(bytes, bl);
+      ::encode(keys, bl);
       ENCODE_FINISH(bl);
     }
 
     void decode(bufferlist::iterator& bl) {
-      DECODE_START(1, bl);
+      DECODE_START(2, bl);
       ::decode(ops, bl);
+      if (struct_v >= 2) {
+	::decode(bytes, bl);
+	::decode(keys, bl);
+      }
       DECODE_FINISH(bl);
     }
 
@@ -153,6 +165,8 @@ class MonitorDBStore
 
     void append(Transaction& other) {
       ops.splice(ops.end(), other.ops);
+      keys += other.keys;
+      bytes += other.bytes;
     }
 
     void append_from_encoded(bufferlist& bl) {
@@ -168,6 +182,12 @@ class MonitorDBStore
 
     bool size() {
       return ops.size();
+    }
+    uint64_t get_keys() const {
+      return keys;
+    }
+    uint64_t get_bytes() const {
+      return bytes;
     }
 
     void dump(ceph::Formatter *f, bool dump_val=false) const {
@@ -218,6 +238,8 @@ class MonitorDBStore
 	f->close_section();
       }
       f->close_section();
+      f->dump_unsigned("num_keys", keys);
+      f->dump_unsigned("num_bytes", bytes);
       f->close_section();
     }
   };
@@ -315,14 +337,14 @@ class MonitorDBStore
     }
     pair<string,string> get_last_key() {
       return last_key;
-    };
+    }
     virtual bool has_next_chunk() {
       return !done && _is_valid();
     }
     virtual void get_chunk_tx(Transaction &tx, uint64_t max) = 0;
     virtual pair<string,string> get_next_key() = 0;
   };
-  typedef std::tr1::shared_ptr<StoreIteratorImpl> Synchronizer;
+  typedef ceph::shared_ptr<StoreIteratorImpl> Synchronizer;
 
   class WholeStoreIteratorImpl : public StoreIteratorImpl {
     KeyValueDB::WholeSpaceIterator iter;
@@ -389,7 +411,7 @@ class MonitorDBStore
     else
       iter->seek_to_first();
 
-    return std::tr1::shared_ptr<StoreIteratorImpl>(
+    return ceph::shared_ptr<StoreIteratorImpl>(
 	new WholeStoreIteratorImpl(iter, prefixes)
     );
   }
@@ -487,18 +509,12 @@ class MonitorDBStore
   }
 
   int open(ostream &out) {
-    db->options.write_buffer_size = g_conf->mon_leveldb_write_buffer_size;
-    db->options.cache_size = g_conf->mon_leveldb_cache_size;
-    db->options.block_size = g_conf->mon_leveldb_block_size;
-    db->options.bloom_size = g_conf->mon_leveldb_bloom_size;
-    db->options.compression_enabled = g_conf->mon_leveldb_compression;
-    db->options.max_open_files = g_conf->mon_leveldb_max_open_files;
-    db->options.paranoid_checks = g_conf->mon_leveldb_paranoid;
-    db->options.log_file = g_conf->mon_leveldb_log;
+    db->init();
     return db->open(out);
   }
 
   int create_and_open(ostream &out) {
+    db->init();
     return db->create_and_open(out);
   }
 
@@ -526,11 +542,14 @@ class MonitorDBStore
     os << path.substr(0, path.size() - pos) << "/store.db";
     string full_path = os.str();
 
-    LevelDBStore *db_ptr = new LevelDBStore(g_ceph_context, full_path);
+    KeyValueDB *db_ptr = KeyValueDB::create(g_ceph_context,
+					    g_conf->mon_keyvaluedb,
+					    full_path);
     if (!db_ptr) {
-      derr << __func__ << " error initializing level db back storage in "
-		<< full_path << dendl;
-      assert(0 != "MonitorDBStore: error initializing level db back storage");
+      derr << __func__ << " error initializing "
+	   << g_conf->mon_keyvaluedb << " db back storage in "
+	   << full_path << dendl;
+      assert(0 != "MonitorDBStore: error initializing keyvaluedb back storage");
     }
     db.reset(db_ptr);
 
@@ -546,7 +565,7 @@ class MonitorDBStore
       }
     }
   }
-  MonitorDBStore(LevelDBStore *db_ptr) :
+  MonitorDBStore(KeyValueDB *db_ptr) :
     db(0), do_dump(false), dump_fd(-1) {
     db.reset(db_ptr);
   }
@@ -557,7 +576,7 @@ class MonitorDBStore
 
 };
 
-WRITE_CLASS_ENCODER(MonitorDBStore::Op);
-WRITE_CLASS_ENCODER(MonitorDBStore::Transaction);
+WRITE_CLASS_ENCODER(MonitorDBStore::Op)
+WRITE_CLASS_ENCODER(MonitorDBStore::Transaction)
 
 #endif /* CEPH_MONITOR_DB_STORE_H */

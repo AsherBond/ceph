@@ -7,7 +7,7 @@
 #include <set>
 #include <map>
 #include <string>
-#include <tr1/memory>
+#include "include/memory.h"
 #include <boost/scoped_ptr.hpp>
 #include "ObjectMap.h"
 
@@ -60,9 +60,19 @@ public:
       const string &prefix ///< [in] Prefix by which to remove keys
       ) = 0;
 
-    virtual ~TransactionImpl() {};
+    virtual ~TransactionImpl() {}
   };
-  typedef std::tr1::shared_ptr< TransactionImpl > Transaction;
+  typedef ceph::shared_ptr< TransactionImpl > Transaction;
+
+  /// create a new instance
+  static KeyValueDB *create(CephContext *cct, const string& type,
+			    const string& dir);
+
+  /// test whether we can successfully initialize; may have side effects (e.g., create)
+  static int test_init(const string& type, const string& dir);
+  virtual int init() = 0;
+  virtual int open(ostream &out) = 0;
+  virtual int create_and_open(ostream &out) = 0;
 
   virtual Transaction get_transaction() = 0;
   virtual int submit_transaction(Transaction) = 0;
@@ -94,7 +104,7 @@ public:
     virtual int status() = 0;
     virtual ~WholeSpaceIteratorImpl() { }
   };
-  typedef std::tr1::shared_ptr< WholeSpaceIteratorImpl > WholeSpaceIterator;
+  typedef ceph::shared_ptr< WholeSpaceIteratorImpl > WholeSpaceIterator;
 
   class IteratorImpl : public ObjectMap::ObjectMapIteratorImpl {
     const string prefix;
@@ -143,14 +153,14 @@ public:
     }
   };
 
-  typedef std::tr1::shared_ptr< IteratorImpl > Iterator;
+  typedef ceph::shared_ptr< IteratorImpl > Iterator;
 
   WholeSpaceIterator get_iterator() {
     return _get_iterator();
   }
 
   Iterator get_iterator(const string &prefix) {
-    return std::tr1::shared_ptr<IteratorImpl>(
+    return ceph::shared_ptr<IteratorImpl>(
       new IteratorImpl(prefix, get_iterator())
     );
   }
@@ -160,7 +170,7 @@ public:
   }
 
   Iterator get_snapshot_iterator(const string &prefix) {
-    return std::tr1::shared_ptr<IteratorImpl>(
+    return ceph::shared_ptr<IteratorImpl>(
       new IteratorImpl(prefix, get_snapshot_iterator())
     );
   }
@@ -168,6 +178,18 @@ public:
   virtual uint64_t get_estimated_size(map<string,uint64_t> &extra) = 0;
 
   virtual ~KeyValueDB() {}
+
+  /// compact the underlying store
+  virtual void compact() {}
+
+  /// compact db for all keys with a given prefix
+  virtual void compact_prefix(const string& prefix) {}
+  /// compact db for all keys with a given prefix, async
+  virtual void compact_prefix_async(const string& prefix) {}
+  virtual void compact_range(const string& prefix,
+			     const string& start, const string& end) {}
+  virtual void compact_range_async(const string& prefix,
+				   const string& start, const string& end) {}
 
 protected:
   virtual WholeSpaceIterator _get_iterator() = 0;

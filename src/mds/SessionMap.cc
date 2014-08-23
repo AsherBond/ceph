@@ -14,6 +14,7 @@
 
 #include "MDS.h"
 #include "MDCache.h"
+#include "Mutation.h"
 #include "SessionMap.h"
 #include "osdc/Filer.h"
 
@@ -29,7 +30,7 @@
 void SessionMap::dump()
 {
   dout(10) << "dump" << dendl;
-  for (hash_map<entity_name_t,Session*>::iterator p = session_map.begin();
+  for (ceph::unordered_map<entity_name_t,Session*>::iterator p = session_map.begin();
        p != session_map.end();
        ++p) 
     dout(10) << p->first << " " << p->second
@@ -154,7 +155,7 @@ void SessionMap::encode(bufferlist& bl) const
   ENCODE_START(3, 3, bl);
   ::encode(version, bl);
 
-  for (hash_map<entity_name_t,Session*>::const_iterator p = session_map.begin(); 
+  for (ceph::unordered_map<entity_name_t,Session*>::const_iterator p = session_map.begin(); 
        p != session_map.end(); 
        ++p) {
     if (p->second->is_open() ||
@@ -221,13 +222,14 @@ void SessionMap::decode(bufferlist::iterator& p)
 void SessionMap::dump(Formatter *f) const
 {
   f->open_array_section("Sessions");
-  for (hash_map<entity_name_t,Session*>::const_iterator p = session_map.begin();
+  for (ceph::unordered_map<entity_name_t,Session*>::const_iterator p = session_map.begin();
        p != session_map.end();
        ++p)  {
     f->open_object_section("Session");
     f->open_object_section("entity name");
     p->first.dump(f);
     f->close_section(); // entity name
+    f->dump_string("state", p->second->get_state_name());
     f->open_object_section("Session info");
     p->second->info.dump(f);
     f->close_section(); // Session info
@@ -258,7 +260,7 @@ void SessionMap::wipe()
 
 void SessionMap::wipe_ino_prealloc()
 {
-  for (hash_map<entity_name_t,Session*>::iterator p = session_map.begin(); 
+  for (ceph::unordered_map<entity_name_t,Session*>::iterator p = session_map.begin(); 
        p != session_map.end(); 
        ++p) {
     p->second->pending_prealloc_inos.clear();
@@ -267,3 +269,24 @@ void SessionMap::wipe_ino_prealloc()
   }
   projected = ++version;
 }
+
+/**
+ * Calculate the length of the `requests` member list,
+ * because elist does not have a size() method.
+ *
+ * O(N) runtime.  This would be const, but elist doesn't
+ * have const iterators.
+ */
+size_t Session::get_request_count()
+{
+  size_t result = 0;
+
+  elist<MDRequestImpl*>::iterator p = requests.begin(
+      member_offset(MDRequestImpl, item_session_request));
+  while (!p.end()) {
+    ++result;
+  }
+
+  return result;
+}
+

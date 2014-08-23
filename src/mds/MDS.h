@@ -29,14 +29,14 @@
 #include "common/Cond.h"
 #include "common/Timer.h"
 #include "common/LogClient.h"
+#include "common/TrackedOp.h"
 
 #include "MDSMap.h"
 
 #include "SessionMap.h"
 
 
-#define CEPH_MDS_PROTOCOL    20 /* cluster internal */
-
+#define CEPH_MDS_PROTOCOL    24 /* cluster internal */
 
 enum {
   l_mds_first = 2000,
@@ -134,15 +134,13 @@ class MMDSBeacon;
 class InoTable;
 class SnapServer;
 class SnapClient;
-class AnchorServer;
-class AnchorClient;
 
 class MDSTableServer;
 class MDSTableClient;
 
 class AuthAuthorizeHandlerRegistry;
 
-class MDS : public Dispatcher {
+class MDS : public Dispatcher, public md_config_obs_t {
  public:
   Mutex        mds_lock;
   SafeTimer    timer;
@@ -155,7 +153,7 @@ class MDS : public Dispatcher {
   int incarnation;
 
   int standby_for_rank;
-  int standby_type;
+  MDSMap::DaemonState standby_type;  // one of STANDBY_REPLAY, ONESHOT_REPLAY
   string standby_for_name;
   bool standby_replaying;  // true if current replay pass is in standby-replay mode
 
@@ -176,9 +174,6 @@ class MDS : public Dispatcher {
 
   InoTable     *inotable;
 
-  AnchorServer *anchorserver;
-  AnchorClient *anchorclient;
-
   SnapServer   *snapserver;
   SnapClient   *snapclient;
 
@@ -186,15 +181,16 @@ class MDS : public Dispatcher {
   MDSTableServer *get_table_server(int t);
 
   PerfCounters       *logger, *mlogger;
+  OpTracker    op_tracker;
 
   int orig_argc;
   const char **orig_argv;
 
  protected:
   // -- MDS state --
-  int last_state;
-  int state;         // my confirmed state
-  int want_state;    // the state i want
+  MDSMap::DaemonState last_state;
+  MDSMap::DaemonState state;         // my confirmed state
+  MDSMap::DaemonState want_state;    // the state i want
 
   list<Context*> waiting_for_active, waiting_for_replay, waiting_for_reconnect, waiting_for_resolve;
   list<Context*> replay_queue;
@@ -204,7 +200,7 @@ class MDS : public Dispatcher {
 
   map<int,version_t> peer_mdsmap_epoch;
 
-  tid_t last_tid;    // for mds-initiated requests (e.g. stray rename)
+  ceph_tid_t last_tid;    // for mds-initiated requests (e.g. stray rename)
 
  public:
   void wait_for_active(Context *c) { 
@@ -249,9 +245,9 @@ class MDS : public Dispatcher {
 
   bool is_stopped()  { return mdsmap->is_stopped(whoami); }
 
-  void request_state(int s);
+  void request_state(MDSMap::DaemonState s);
 
-  tid_t issue_tid() { return ++last_tid; }
+  ceph_tid_t issue_tid() { return ++last_tid; }
     
 
   // -- waiters --
@@ -316,8 +312,12 @@ class MDS : public Dispatcher {
  public:
 
   int get_req_rate() { return req_rate; }
+  Session *get_session(client_t client) {
+    return sessionmap.get_session(entity_name_t::CLIENT(client.v));
+  }
 
  private:
+  int dispatch_depth;
   bool ms_dispatch(Message *m);
   bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer, bool force_new);
   bool ms_verify_authorizer(Connection *con, int peer_type,
@@ -337,6 +337,7 @@ class MDS : public Dispatcher {
 
   // who am i etc
   int get_nodeid() { return whoami; }
+  uint64_t get_metadata_pool() { return mdsmap->get_metadata_pool(); }
   MDSMap *get_mds_map() { return mdsmap; }
   OSDMap *get_osd_map() { return osdmap; }
 
@@ -356,16 +357,42 @@ class MDS : public Dispatcher {
   }
 
   // start up, shutdown
-  int init(int wanted_state=MDSMap::STATE_BOOT);
+  int init(MDSMap::DaemonState wanted_state=MDSMap::STATE_BOOT);
 
+  // admin socket handling
+  friend class MDSSocketHook;
+  class MDSSocketHook *asok_hook;
+  bool asok_command(string command, cmdmap_t& cmdmap, string format,
+		    ostream& ss);
+  void set_up_admin_socket();
+  void clean_up_admin_socket();
+  void check_ops_in_flight(); // send off any slow ops to monitor
+    // config observer bits
+  virtual const char** get_tracked_conf_keys() const;
+  virtual void handle_conf_change(const struct md_config_t *conf,
+				  const std::set <std::string> &changed);
   void create_logger();
 
   void bcast_mds_map();  // to mounted clients
 
   void boot_create();             // i am new mds.
-  void boot_start(int step=0, int r=0);    // starting|replay
 
+ private:
+  typedef enum {
+    // The MDSMap is available, configure default layouts and structures
+    MDS_BOOT_INITIAL = 0,
+    // We are ready to open some inodes
+    MDS_BOOT_OPEN_ROOT,
+    // We are ready to do a replay if needed
+    MDS_BOOT_PREPARE_LOG,
+    // Replay is complete
+    MDS_BOOT_REPLAY_DONE
+  } BootStep;
+
+  friend class C_MDS_BootStart;
+  void boot_start(BootStep step=MDS_BOOT_INITIAL, int r=0);    // starting|replay
   void calc_recovery_set();
+ public:
 
   void replay_start();
   void creating_done();
@@ -385,7 +412,7 @@ class MDS : public Dispatcher {
   void rejoin_joint_start();
   void rejoin_start();
   void rejoin_done();
-  void recovery_done();
+  void recovery_done(int oldstate);
   void clientreplay_start();
   void clientreplay_done();
   void active_start();
@@ -405,6 +432,9 @@ class MDS : public Dispatcher {
   void handle_mds_beacon(MMDSBeacon *m);
 
   void request_osdmap(Context *c);
+
+  void inc_dispatch_depth() { ++dispatch_depth; }
+  void dec_dispatch_depth() { --dispatch_depth; }
 
   // messages
   bool _dispatch(Message *m);
@@ -433,7 +463,9 @@ public:
     this->mds = mds;
   }
   virtual void finish(int r) {
+    mds->inc_dispatch_depth();
     mds->_dispatch(m);
+    mds->dec_dispatch_depth();
   }
 };
 

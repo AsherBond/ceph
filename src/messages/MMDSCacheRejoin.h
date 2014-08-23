@@ -33,15 +33,11 @@ class MMDSCacheRejoin : public Message {
   static const int OP_WEAK    = 1;  // replica -> auth, i exist, + maybe open files.
   static const int OP_STRONG  = 2;  // replica -> auth, i exist, + open files and lock state.
   static const int OP_ACK     = 3;  // auth -> replica, here is your lock state.
-  static const int OP_MISSING = 5;  // auth -> replica, i am missing these items
-  static const int OP_FULL    = 6;  // replica -> auth, here is the full object.
   static const char *get_opname(int op) {
     switch (op) {
     case OP_WEAK: return "weak";
     case OP_STRONG: return "strong";
     case OP_ACK: return "ack";
-    case OP_MISSING: return "missing";
-    case OP_FULL: return "full";
     default: assert(0); return 0;
     }
   }
@@ -168,6 +164,7 @@ class MMDSCacheRejoin : public Message {
 
   // open
   map<inodeno_t,map<client_t, ceph_mds_cap_reconnect> > cap_exports;
+  map<client_t, entity_inst_t> client_map;
   bufferlist imported_caps;
 
   // full
@@ -221,12 +218,10 @@ public:
   void add_strong_inode(vinodeno_t i, int n, int cw, int dl, int nl, int dftl) {
     strong_inodes[i] = inode_strong(n, cw, dl, nl, dftl);
   }
-  void add_inode_locks(CInode *in, __u32 nonce) {
+  void add_inode_locks(CInode *in, __u32 nonce, bufferlist& bl) {
     ::encode(in->inode.ino, inode_locks);
     ::encode(in->last, inode_locks);
     ::encode(nonce, inode_locks);
-    bufferlist bl;
-    in->_encode_locks_state_for_replica(bl);
     ::encode(bl, inode_locks);
   }
   void add_inode_base(CInode *in) {
@@ -300,6 +295,7 @@ public:
     ::encode(xlocked_inodes, payload);
     ::encode(wrlocked_inodes, payload);
     ::encode(cap_exports, payload);
+    ::encode(client_map, payload);
     ::encode(imported_caps, payload);
     ::encode(strong_dirfrags, payload);
     ::encode(dirfrag_bases, payload);
@@ -322,6 +318,7 @@ public:
     ::decode(xlocked_inodes, p);
     ::decode(wrlocked_inodes, p);
     ::decode(cap_exports, p);
+    ::decode(client_map, p);
     ::decode(imported_caps, p);
     ::decode(strong_dirfrags, p);
     ::decode(dirfrag_bases, p);

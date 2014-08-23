@@ -93,11 +93,6 @@ For example::
 	rbd snap rollback rbd/foo@snapname
 
 
-
-For the rollback section, you could mention that rollback means
-overwriting the current version with data from a snapshot, and takes
-longer with larger images. So cloning is preferable for fast recovery.
-
 .. note:: Rolling back an image to a snapshot means overwriting 
    the current version of the image with data from a snapshot. The 
    time it takes to execute a rollback increases with the size of the 
@@ -225,7 +220,7 @@ clone snapshots  from one pool to images in another pool.
 
 #. **Template Pool:** One way to use block device layering is to create a 
    pool that contains master images that act as templates, and snapshots of those
-   templates. You may then extend read-only priveleges to users so that they 
+   templates. You may then extend read-only privileges to users so that they 
    may clone the snapshots without the ability to write or execute within the pool.
 
 #. **Image Migration/Recovery:** One way to use block device layering is to migrate
@@ -234,7 +229,7 @@ clone snapshots  from one pool to images in another pool.
 Protecting a Snapshot
 ---------------------
 
-Clones access the parent snapshots. All clones would break if a user inadvertantly 
+Clones access the parent snapshots. All clones would break if a user inadvertently 
 deleted the parent snapshot. To prevent data loss, you **MUST** protect the
 snapshot before you can clone it. ::
 

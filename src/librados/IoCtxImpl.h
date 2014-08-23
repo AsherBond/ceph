@@ -42,10 +42,10 @@ struct librados::IoCtxImpl {
   object_locator_t oloc;
 
   Mutex aio_write_list_lock;
-  tid_t aio_write_seq;
+  ceph_tid_t aio_write_seq;
   Cond aio_write_cond;
   xlist<AioCompletionImpl*> aio_write_list;
-  map<tid_t, std::list<AioCompletionImpl*> > aio_write_waiters;
+  map<ceph_tid_t, std::list<AioCompletionImpl*> > aio_write_waiters;
 
   Mutex *lock;
   Objecter *objecter;
@@ -111,6 +111,7 @@ struct librados::IoCtxImpl {
 
   // io
   int list(Objecter::ListContext *context, int max_entries);
+  uint32_t list_seek(Objecter::ListContext *context, uint32_t pos);
   int create(const object_t& oid, bool exclusive);
   int create(const object_t& oid, bool exclusive, const std::string& category);
   int write(const object_t& oid, bufferlist& bl, size_t len, uint64_t off);
@@ -130,6 +131,7 @@ struct librados::IoCtxImpl {
   int tmap_update(const object_t& oid, bufferlist& cmdbl);
   int tmap_put(const object_t& oid, bufferlist& bl);
   int tmap_get(const object_t& oid, bufferlist& bl);
+  int tmap_to_omap(const object_t& oid, bool nullok=false);
 
   int exec(const object_t& oid, const char *cls, const char *method, bufferlist& inbl, bufferlist& outbl);
 
@@ -138,10 +140,11 @@ struct librados::IoCtxImpl {
   int getxattrs(const object_t& oid, map<string, bufferlist>& attrset);
   int rmxattr(const object_t& oid, const char *name);
 
-  int operate(const object_t& oid, ::ObjectOperation *o, time_t *pmtime);
-  int operate_read(const object_t& oid, ::ObjectOperation *o, bufferlist *pbl);
+  int operate(const object_t& oid, ::ObjectOperation *o, time_t *pmtime, int flags=0);
+  int operate_read(const object_t& oid, ::ObjectOperation *o, bufferlist *pbl, int flags=0);
   int aio_operate(const object_t& oid, ::ObjectOperation *o,
-		  AioCompletionImpl *c, const SnapContext& snap_context);
+		  AioCompletionImpl *c, const SnapContext& snap_context,
+		  int flags);
   int aio_operate_read(const object_t& oid, ::ObjectOperation *o,
 		       AioCompletionImpl *c, int flags, bufferlist *pbl);
 
@@ -198,6 +201,10 @@ struct librados::IoCtxImpl {
   int _notify_ack(
     const object_t& oid, uint64_t notify_id, uint64_t ver,
     uint64_t cookie);
+
+  int set_alloc_hint(const object_t& oid,
+                     uint64_t expected_object_size,
+                     uint64_t expected_write_size);
 
   version_t last_version();
   void set_assert_version(uint64_t ver);

@@ -663,14 +663,14 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
     struct rgw_bucket_dir_entry remove_entry;
     int ret = read_index_entry(hctx, remove_oid_name, &remove_entry);
     if (ret < 0) {
-      CLS_LOG(1, "rgw_bucket_complete_op(): removing entries, read_index_entry name=%s ret=%d\n", remove_oid_name.c_str(), rc);
+      CLS_LOG(1, "rgw_bucket_complete_op(): removing entries, read_index_entry name=%s ret=%d\n", remove_oid_name.c_str(), ret);
       continue;
     }
     CLS_LOG(0, "rgw_bucket_complete_op(): entry.name=%s entry.meta.category=%d\n", remove_entry.name.c_str(), remove_entry.meta.category);
     unaccount_entry(header, remove_entry);
 
     if (op.log_op) {
-      rc = log_index_operation(hctx, op.name, CLS_RGW_OP_DEL, op.tag, remove_entry.meta.mtime,
+      rc = log_index_operation(hctx, remove_oid_name, CLS_RGW_OP_DEL, op.tag, remove_entry.meta.mtime,
                                remove_entry.ver, CLS_RGW_STATE_COMPLETE, header.ver, header.max_marker);
       if (rc < 0)
         continue;
@@ -755,7 +755,7 @@ int rgw_dir_suggest_changes(cls_method_context_t hctx, bufferlist *in, bufferlis
     if (cur_disk.pending_map.empty()) {
       if (cur_disk.exists) {
         struct rgw_bucket_category_stats& old_stats = header.stats[cur_disk.meta.category];
-        CLS_LOG(10, "total_entries: %"PRId64" -> %"PRId64"\n", old_stats.num_entries, old_stats.num_entries - 1);
+        CLS_LOG(10, "total_entries: %" PRId64 " -> %" PRId64 "\n", old_stats.num_entries, old_stats.num_entries - 1);
         old_stats.num_entries--;
         old_stats.total_size -= cur_disk.meta.size;
         old_stats.total_size_rounded -= get_rounded_size(cur_disk.meta.size);
@@ -771,7 +771,7 @@ int rgw_dir_suggest_changes(cls_method_context_t hctx, bufferlist *in, bufferlis
 	  return ret;
         break;
       case CEPH_RGW_UPDATE:
-        CLS_LOG(10, "CEPH_RGW_UPDATE name=%s total_entries: %"PRId64" -> %"PRId64"\n", cur_change.name.c_str(), stats.num_entries, stats.num_entries + 1);
+        CLS_LOG(10, "CEPH_RGW_UPDATE name=%s total_entries: %" PRId64 " -> %" PRId64 "\n", cur_change.name.c_str(), stats.num_entries, stats.num_entries + 1);
         stats.num_entries++;
         stats.total_size += cur_change.meta.size;
         stats.total_size_rounded += get_rounded_size(cur_change.meta.size);
@@ -1427,7 +1427,7 @@ static int rgw_cls_gc_defer_entry(cls_method_context_t hctx, bufferlist *in, buf
   return gc_defer_entry(hctx, op.tag, op.expiration_secs);
 }
 
-static int gc_iterate_entries(cls_method_context_t hctx, const string& marker,
+static int gc_iterate_entries(cls_method_context_t hctx, const string& marker, bool expired_only,
                               string& key_iter, uint32_t max_entries, bool *truncated,
                               int (*cb)(cls_method_context_t, const string&, cls_rgw_gc_obj_info&, void *),
                               void *param)
@@ -1449,12 +1449,14 @@ static int gc_iterate_entries(cls_method_context_t hctx, const string& marker,
     start_key = key_iter;
   }
 
-  utime_t now = ceph_clock_now(g_ceph_context);
-  string now_str;
-  get_time_key(now, &now_str);
-  prepend_index_prefix(now_str, GC_OBJ_TIME_INDEX, &end_key);
+  if (expired_only) {
+    utime_t now = ceph_clock_now(g_ceph_context);
+    string now_str;
+    get_time_key(now, &now_str);
+    prepend_index_prefix(now_str, GC_OBJ_TIME_INDEX, &end_key);
 
-  CLS_LOG(0, "gc_iterate_entries end_key=%s\n", end_key.c_str());
+    CLS_LOG(0, "gc_iterate_entries end_key=%s\n", end_key.c_str());
+  }
 
   string filter;
 
@@ -1475,7 +1477,7 @@ static int gc_iterate_entries(cls_method_context_t hctx, const string& marker,
 
       CLS_LOG(10, "gc_iterate_entries key=%s\n", key.c_str());
 
-      if (key.compare(end_key) >= 0)
+      if (!end_key.empty() && key.compare(end_key) >= 0)
         return 0;
 
       if (!key_in_index(key, GC_OBJ_TIME_INDEX))
@@ -1512,10 +1514,11 @@ static int gc_list_cb(cls_method_context_t hctx, const string& key, cls_rgw_gc_o
 }
 
 static int gc_list_entries(cls_method_context_t hctx, const string& marker,
-			   uint32_t max, list<cls_rgw_gc_obj_info>& entries, bool *truncated)
+			   uint32_t max, bool expired_only,
+                           list<cls_rgw_gc_obj_info>& entries, bool *truncated)
 {
   string key_iter;
-  int ret = gc_iterate_entries(hctx, marker,
+  int ret = gc_iterate_entries(hctx, marker, expired_only,
                               key_iter, max, truncated,
                               gc_list_cb, &entries);
   return ret;
@@ -1534,7 +1537,7 @@ static int rgw_cls_gc_list(cls_method_context_t hctx, bufferlist *in, bufferlist
   }
 
   cls_rgw_gc_list_ret op_ret;
-  int ret = gc_list_entries(hctx, op.marker, op.max, op_ret.entries, &op_ret.truncated);
+  int ret = gc_list_entries(hctx, op.marker, op.max, op.expired_only, op_ret.entries, &op_ret.truncated);
   if (ret < 0)
     return ret;
 

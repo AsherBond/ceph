@@ -58,15 +58,15 @@ public:
   friend class MOSDOpReply;
 
   // read
-  snapid_t get_snapid() { return snapid; }
-  void set_snapid(snapid_t s) { snapid = s; }
+  const snapid_t& get_snapid() { return snapid; }
+  void set_snapid(const snapid_t& s) { snapid = s; }
   // writ
-  snapid_t get_snap_seq() const { return snap_seq; }
+  const snapid_t& get_snap_seq() const { return snap_seq; }
   const vector<snapid_t> &get_snaps() const { return snaps; }
   void set_snaps(const vector<snapid_t>& i) {
     snaps = i;
   }
-  void set_snap_seq(snapid_t s) { snap_seq = s; }
+  void set_snap_seq(const snapid_t& s) { snap_seq = s; }
 
   osd_reqid_t get_reqid() const {
     return osd_reqid_t(get_orig_source(),
@@ -74,26 +74,26 @@ public:
 		       header.tid);
   }
   int get_client_inc() { return client_inc; }
-  tid_t get_client_tid() { return header.tid; }
+  ceph_tid_t get_client_tid() { return header.tid; }
   
   object_t& get_oid() { return oid; }
 
-  pg_t     get_pg() const { return pgid; }
+  const pg_t&     get_pg() const { return pgid; }
 
-  object_locator_t get_object_locator() const {
+  const object_locator_t& get_object_locator() const {
     return oloc;
   }
 
   epoch_t  get_map_epoch() { return osdmap_epoch; }
 
-  eversion_t get_version() { return reassert_version; }
+  const eversion_t& get_version() { return reassert_version; }
   
   utime_t get_mtime() { return mtime; }
 
   MOSDOp()
     : Message(CEPH_MSG_OSD_OP, HEAD_VERSION, COMPAT_VERSION) { }
   MOSDOp(int inc, long tid,
-         object_t& _oid, object_locator_t& _oloc, pg_t _pgid, epoch_t _osdmap_epoch,
+         object_t& _oid, object_locator_t& _oloc, pg_t& _pgid, epoch_t _osdmap_epoch,
 	 int _flags)
     : Message(CEPH_MSG_OSD_OP, HEAD_VERSION, COMPAT_VERSION),
       client_inc(inc),
@@ -337,6 +337,9 @@ struct ceph_osd_request_head {
     OSDOp::split_osd_op_vector_in_data(ops, data);
   }
 
+  void clear_buffers() {
+    ops.clear();
+  }
 
   const char *get_type_name() const { return "osd_op"; }
   void print(ostream& out) const {
@@ -363,18 +366,11 @@ struct ceph_osd_request_head {
     out << " " << pgid;
     if (is_retry_attempt())
       out << " RETRY=" << get_retry_attempt();
+    if (reassert_version != eversion_t())
+      out << " reassert_version=" << reassert_version;
     if (get_snap_seq())
       out << " snapc " << get_snap_seq() << "=" << snaps;
-    if (get_flags() & CEPH_OSD_FLAG_ORDERSNAP)
-      out << " ordersnap";
-    if (get_flags() & CEPH_OSD_FLAG_BALANCE_READS)
-      out << " balance_reads";
-    if (get_flags() & CEPH_OSD_FLAG_PARALLELEXEC)
-      out << " parallelexec";
-    if (get_flags() & CEPH_OSD_FLAG_LOCALIZE_READS)
-      out << " localize_reads";
-    if (get_flags() & CEPH_OSD_FLAG_RWORDERED)
-      out << " rwordered";
+    out << " " << ceph_osd_flag_string(get_flags());
     out << " e" << osdmap_epoch;
     out << ")";
   }

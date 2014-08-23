@@ -41,6 +41,7 @@ TEST(DaemonConfig, SimpleSet) {
 TEST(DaemonConfig, Substitution) {
   int ret;
   ret = g_ceph_context->_conf->set_val("internal_safe_to_start_threads", "false");
+  ASSERT_EQ(ret, 0);
   ret = g_ceph_context->_conf->set_val("host", "foo");
   ASSERT_EQ(ret, 0);
   ret = g_ceph_context->_conf->set_val("public_network", "bar$host.baz", false);
@@ -57,6 +58,7 @@ TEST(DaemonConfig, Substitution) {
 TEST(DaemonConfig, SubstitutionTrailing) {
   int ret;
   ret = g_ceph_context->_conf->set_val("internal_safe_to_start_threads", "false");
+  ASSERT_EQ(ret, 0);
   ret = g_ceph_context->_conf->set_val("host", "foo");
   ASSERT_EQ(ret, 0);
   ret = g_ceph_context->_conf->set_val("public_network", "bar$host", false);
@@ -73,6 +75,7 @@ TEST(DaemonConfig, SubstitutionTrailing) {
 TEST(DaemonConfig, SubstitutionBraces) {
   int ret;
   ret = g_ceph_context->_conf->set_val("internal_safe_to_start_threads", "false");
+  ASSERT_EQ(ret, 0);
   ret = g_ceph_context->_conf->set_val("host", "foo");
   ASSERT_EQ(ret, 0);
   ret = g_ceph_context->_conf->set_val("public_network", "bar${host}baz", false);
@@ -88,6 +91,7 @@ TEST(DaemonConfig, SubstitutionBraces) {
 TEST(DaemonConfig, SubstitutionBracesTrailing) {
   int ret;
   ret = g_ceph_context->_conf->set_val("internal_safe_to_start_threads", "false");
+  ASSERT_EQ(ret, 0);
   ret = g_ceph_context->_conf->set_val("host", "foo");
   ASSERT_EQ(ret, 0);
   ret = g_ceph_context->_conf->set_val("public_network", "bar${host}", false);
@@ -101,24 +105,21 @@ TEST(DaemonConfig, SubstitutionBracesTrailing) {
   ASSERT_EQ(string("barfoo"), string(buf));
 }
 
-TEST(DaemonConfig, SubstitutionLoop) {
+// config: variable substitution happen only once http://tracker.ceph.com/issues/7103
+TEST(DaemonConfig, SubstitutionMultiple) {
   int ret;
-  ret = g_ceph_context->_conf->set_val("internal_safe_to_start_threads", "false");
-  ret = g_ceph_context->_conf->set_val("host", "foo$public_network", false);
+  ret = g_ceph_context->_conf->set_val("mon_host", "localhost", false);
   ASSERT_EQ(ret, 0);
-  ret = g_ceph_context->_conf->set_val("public_network", "bar$host", false);
+  ret = g_ceph_context->_conf->set_val("keyring", "$mon_host/$cluster.keyring,$mon_host/$cluster.mon.keyring", false);
   ASSERT_EQ(ret, 0);
   g_ceph_context->_conf->apply_changes(NULL);
-  char buf[128], buf2[128];
+  char buf[512];
   memset(buf, 0, sizeof(buf));
-  memset(buf2, 0, sizeof(buf2));
   char *tmp = buf;
-  char *tmp2 = buf;
-  ret = g_ceph_context->_conf->get_val("host", &tmp, sizeof(buf));
+  ret = g_ceph_context->_conf->get_val("keyring", &tmp, sizeof(buf));
   ASSERT_EQ(ret, 0);
-  ret = g_ceph_context->_conf->get_val("public_network", &tmp2, sizeof(buf));
-  ASSERT_EQ(ret, 0);
-  ASSERT_TRUE(strchr(buf, '$') || strchr(buf2, '$'));
+  ASSERT_EQ(string("localhost/ceph.keyring,localhost/ceph.mon.keyring"), tmp);
+  ASSERT_TRUE(strchr(buf, '$') == NULL);
 }
 
 TEST(DaemonConfig, ArgV) {
@@ -332,3 +333,8 @@ TEST(DaemonConfig, ThreadSafety1) {
 				       "false"));
   ASSERT_EQ(ret, 0);
 }
+/*
+ * Local Variables:
+ * compile-command: "cd .. ; make unittest_daemon_config && ./unittest_daemon_config"
+ * End:
+ */

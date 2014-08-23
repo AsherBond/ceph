@@ -38,7 +38,8 @@ namespace librbd {
     ::SnapContext snapc;
     std::vector<librados::snap_t> snaps; // this mirrors snapc.snaps, but is in
                                         // a format librados can understand
-    std::map<std::string, SnapInfo> snaps_by_name;
+    std::map<librados::snap_t, SnapInfo> snap_info;
+    std::map<std::string, librados::snap_t> snap_ids;
     uint64_t snap_id;
     bool snap_exists; // false if our snap_id was deleted
     // whether the image was opened read-only. cannot be changed after opening
@@ -68,6 +69,8 @@ namespace librbd {
     RWLock snap_lock; // protects snapshot-related member variables:
     RWLock parent_lock; // protects parent_md and parent
     Mutex refresh_lock; // protects refresh_seq and last_refresh
+
+    unsigned extra_read_flags;
 
     bool old_format;
     uint8_t order;
@@ -99,14 +102,20 @@ namespace librbd {
     void init_layout();
     void perf_start(std::string name);
     void perf_stop();
+    void set_read_flag(unsigned flag);
     int get_read_flags(librados::snap_t snap_id);
     int snap_set(std::string in_snap_name);
     void snap_unset();
     librados::snap_t get_snap_id(std::string in_snap_name) const;
-    int get_snap_name(snapid_t snap_id, std::string *out_snap_name) const;
-    int get_parent_spec(snapid_t snap_id, parent_spec *pspec);
-    int is_snap_protected(string in_snap_name, bool *is_protected) const;
-    int is_snap_unprotected(string in_snap_name, bool *is_unprotected) const;
+    const SnapInfo* get_snap_info(librados::snap_t in_snap_id) const;
+    int get_snap_name(librados::snap_t in_snap_id,
+		      std::string *out_snap_name) const;
+    int get_parent_spec(librados::snap_t in_snap_id,
+			parent_spec *pspec) const;
+    int is_snap_protected(librados::snap_t in_snap_id,
+			  bool *is_protected) const;
+    int is_snap_unprotected(librados::snap_t in_snap_id,
+			    bool *is_unprotected) const;
 
     uint64_t get_current_size() const;
     uint64_t get_object_size() const;
@@ -122,6 +131,7 @@ namespace librbd {
     uint64_t get_image_size(librados::snap_t in_snap_id) const;
     int get_features(librados::snap_t in_snap_id,
 		     uint64_t *out_features) const;
+    const parent_info* get_parent_info(librados::snap_t in_snap_id) const;
     int64_t get_parent_pool_id(librados::snap_t in_snap_id) const;
     std::string get_parent_image_id(librados::snap_t in_snap_id) const;
     uint64_t get_parent_snap_id(librados::snap_t in_snap_id) const;
@@ -136,7 +146,7 @@ namespace librbd {
     void flush_cache_aio(Context *onfinish);
     int flush_cache();
     void shutdown_cache();
-    void invalidate_cache();
+    int invalidate_cache();
     void clear_nonexistence_cache();
     int register_watch();
     void unregister_watch();

@@ -24,10 +24,19 @@ extraopts += --with-ocf --with-rest-bench --with-nss
 extraopts += --with-debug
 extraopts += --enable-cephfs-java
 
+# rocksdb is not packaged by anyone.  build it if we can.
+extraopts += --with-librocksdb-static=check
+
 ifeq ($(DEB_HOST_ARCH), armel)
   # armel supports ARMv4t or above instructions sets.
   # libatomic-ops is only usable with Ceph for ARMv6 or above.
   extraopts += --without-libatomic-ops
+endif
+
+ifeq ($(shell lsb_release -sc | egrep -q '(precise|quantal|raring|saucy|wheezy)' && echo yes),yes)
+  extraopts += --without-lttng --without-babeltrace
+else
+  extraopts += --with-lttng --with-babeltrace
 endif
 
 configure: configure-stamp
@@ -119,7 +128,8 @@ binary-arch: build install
 	# per package, so do this ourselves
 	install -d -m0755 debian/ceph/etc/init
 	install -m0644 src/upstart/ceph*.conf debian/ceph/etc/init
-	install -m0644 src/upstart/rbdmap.conf debian/ceph/etc/init
+	install -d -m0755 debian/ceph-common/etc/init
+	install -m0644 src/upstart/rbdmap.conf debian/ceph-common/etc/init
 	install -d -m0755 debian/ceph-mds/etc/init
 	mv debian/ceph/etc/init/ceph-mds* debian/ceph-mds/etc/init
 	install -d -m0755 debian/radosgw/etc/init
@@ -135,6 +145,7 @@ binary-arch: build install
 	dh_strip -pceph-common --dbg-package=ceph-common-dbg
 	dh_strip -pceph-fs-common --dbg-package=ceph-fs-common-dbg
 	dh_strip -plibrados2 --dbg-package=librados2-dbg
+	dh_strip -plibradosstriper1 --dbg-package=libradosstriper1-dbg
 	dh_strip -plibrbd1 --dbg-package=librbd1-dbg
 	dh_strip -plibcephfs1 --dbg-package=libcephfs1-dbg
 	dh_strip -pradosgw --dbg-package=radosgw-dbg

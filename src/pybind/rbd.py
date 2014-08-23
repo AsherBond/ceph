@@ -73,6 +73,9 @@ class ArgumentOutOfRange(Error):
 class ConnectionShutdown(Error):
     pass
 
+class Timeout(Error):
+    pass
+
 def make_ex(ret, msg):
     """
     Translate a librbd return code into an exception.
@@ -95,7 +98,8 @@ def make_ex(ret, msg):
         errno.ENOTEMPTY : ImageHasSnapshots,
         errno.ENOSYS    : FunctionNotSupported,
         errno.EDOM      : ArgumentOutOfRange,
-        errno.ESHUTDOWN : ConnectionShutdown
+        errno.ESHUTDOWN : ConnectionShutdown,
+        errno.ETIMEDOUT : Timeout,
         }
     ret = abs(ret)
     if ret in errors:
@@ -122,9 +126,15 @@ def load_librbd():
     Load the librbd shared library.
     """
     librbd_path = find_library('rbd')
-    if not librbd_path:
-        raise EnvironmentError("Unable to find librbd")
-    return CDLL(librbd_path)
+    if librbd_path:
+        return CDLL(librbd_path)
+
+    # try harder, find_library() doesn't search LD_LIBRARY_PATH
+    # in addition, it doesn't seem work on centos 6.4 (see e46d2ca067b5)
+    try:
+        return CDLL('librbd.so.1')
+    except OSError as e:
+        raise EnvironmentError("Unable to load librbd: %s" % e)
 
 class RBD(object):
     """
@@ -446,7 +456,7 @@ class Image(object):
             pool = create_string_buffer(size)
             name = create_string_buffer(size)
             snapname = create_string_buffer(size)
-            ret = self.librbd.rbd_get_parent_info(self.image, pool, len(pool), 
+            ret = self.librbd.rbd_get_parent_info(self.image, pool, len(pool),
                 name, len(name), snapname, len(snapname))
             if ret == -errno.ERANGE:
                 size *= 2
@@ -739,6 +749,14 @@ written." % (self.name, ret, length))
         ret = self.librbd.rbd_flush(self.image)
         if ret < 0:
             raise make_ex(ret, 'error flushing image')
+
+    def invalidate_cache(self):
+        """
+        Drop any cached data for the image.
+        """
+        ret = self.librbd.rbd_invalidate_cache(self.image)
+        if ret < 0:
+            raise make_ex(ret, 'error invalidating cache')
 
     def stripe_unit(self):
         """

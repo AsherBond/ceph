@@ -43,6 +43,10 @@ Install Ceph
 
 	ceph-deploy admin ceph-client
 
+   The ``ceph-deploy`` utility copies the keyring to the ``/etc/ceph`` 
+   directory. Ensure that the keyring file has appropriate read permissions 
+   (e.g., ``sudo chmod + r /etc/ceph/ceph.client.admin.keyring``).
+
 
 Configure a Block Device
 ========================
@@ -50,10 +54,6 @@ Configure a Block Device
 #. On the ``ceph-client`` node, create a block device image. :: 
 
 	rbd create foo --size 4096 [-m {mon-IP}] [-k /path/to/ceph.client.admin.keyring]
-
-#. On the ``ceph-client`` node, load the ``rbd`` client module. ::
-
-	sudo modprobe rbd
 
 #. On the ``ceph-client`` node, map the image to a block device. :: 
 
@@ -77,5 +77,5 @@ See `block devices`_ for additional details.
 
 .. _Storage Cluster Quick Start: ../quick-ceph-deploy
 .. _block devices: ../../rbd/rbd
-.. _FAQ: http://wiki.ceph.com/03FAQs/01General_FAQ#How_Can_I_Give_Ceph_a_Try.3F
+.. _FAQ: http://wiki.ceph.com/FAQs/How_Can_I_Give_Ceph_a_Try%3F
 .. _OS Recommendations: ../os-recommendations

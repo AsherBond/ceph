@@ -1,3 +1,6 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+
 #ifndef CEPH_RGW_GC_H
 #define CEPH_RGW_GC_H
 
@@ -49,7 +52,7 @@ public:
   void initialize(CephContext *_cct, RGWRados *_store);
   void finalize();
 
-  int list(int *index, string& marker, uint32_t max, std::list<cls_rgw_gc_obj_info>& result, bool *truncated);
+  int list(int *index, string& marker, uint32_t max, bool expired_only, std::list<cls_rgw_gc_obj_info>& result, bool *truncated);
   void list_init(int *index) { *index = 0; }
   int process(int index, int process_max_secs);
   int process();

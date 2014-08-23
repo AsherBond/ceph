@@ -159,6 +159,11 @@ using namespace std;
 #include "messages/MOSDPGPushReply.h"
 #include "messages/MOSDPGPull.h"
 
+#include "messages/MOSDECSubOpWrite.h"
+#include "messages/MOSDECSubOpWriteReply.h"
+#include "messages/MOSDECSubOpRead.h"
+#include "messages/MOSDECSubOpReadReply.h"
+
 #define DEBUGLVL  10    // debug level of output
 
 #define dout_subsys ceph_subsys_ms
@@ -466,6 +471,18 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
   case MSG_OSD_PG_PUSH_REPLY:
     m = new MOSDPGPushReply;
     break;
+  case MSG_OSD_EC_WRITE:
+    m = new MOSDECSubOpWrite;
+    break;
+  case MSG_OSD_EC_WRITE_REPLY:
+    m = new MOSDECSubOpWriteReply;
+    break;
+  case MSG_OSD_EC_READ:
+    m = new MOSDECSubOpRead;
+    break;
+  case MSG_OSD_EC_READ_REPLY:
+    m = new MOSDECSubOpReadReply;
+    break;
    // auth
   case CEPH_MSG_AUTH:
     m = new MAuth;
@@ -670,6 +687,8 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
     return 0;
   }
 
+  m->set_cct(cct);
+
   // m->header.version, if non-zero, should be populated with the
   // newest version of the encoding the code supports.  If set, check
   // it against compat_version.
@@ -686,7 +705,7 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
     m->put();
     return 0;
   }
-  
+
   m->set_header(header);
   m->set_footer(footer);
   m->set_payload(front);

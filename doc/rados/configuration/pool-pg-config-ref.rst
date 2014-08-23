@@ -20,7 +20,7 @@ Ceph configuration file.
 
 ``mon max pool pg num``
 
-:Description: The maximium number of placement groups per pool.
+:Description: The maximum number of placement groups per pool.
 :Type: Integer
 :Default: ``65536``
 
@@ -66,40 +66,36 @@ Ceph configuration file.
 :Default: ``1``. Typically a host containing one or more Ceph OSD Daemons.
 
 
-``osd min rep``
+``osd pool default crush replicated ruleset`` 
 
-:Description: The minimum number of replicas for a ruleset.
-:Type: 32-bit Integer
-:Default: ``1``
-
-
-``osd max rep``
-
-:Description: The maximum number of replicas for a ruleset.
-:Type: 32-bit Integer
-:Default: ``10``
-
-
-``osd pool default crush rule`` 
-
-:Description: The default CRUSH ruleset to use when creating a pool.
-:Type: 32-bit Integer
+:Description: The default CRUSH ruleset to use when creating a replicated pool.
+:Type: 8-bit Integer
 :Default: ``0``
 
 
-``osd pool default size`` 
+``osd pool erasure code stripe width`` 
 
-:Description: Sets the number of replicas for objects in the pool. The default 
-              value is the same as 
+:Description: Sets the desired size, in bytes, of an object stripe on every
+              erasure coded pools. Every object if size S will be stored as 
+              N stripes and each stripe will be encoded/decoded individually.
+
+:Type: Unsigned 32-bit Integer
+:Default: ``4096`` 
+
+
+``osd pool default size``
+
+:Description: Sets the number of replicas for objects in the pool. The default
+              value is the same as
               ``ceph osd pool set {pool-name} size {size}``.
 
 :Type: 32-bit Integer
-:Default: ``2`` 
+:Default: ``3``
 
 
 ``osd pool default min size``
 
-:Descrption: Sets the minimum number of written replicas for objects in the 
+:Description: Sets the minimum number of written replicas for objects in the 
              pool in order to acknowledge a write operation to the client. 
              If minimum is not met, Ceph will not acknowledge the write to the 
              client. This setting ensures a minimum number of replicas when 
